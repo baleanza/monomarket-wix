@@ -1,1 +1,7 @@
-{"name":"monomarket-ap","version":"1.0.0"}
+{
+"name": "monomarket-api",
+"version": "1.0.0",
+"dependencies": {
+"googleapis": "^105.0.0"
+}
+}
