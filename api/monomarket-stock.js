@@ -1,11 +1,5 @@
-export default async function handler(req, res) {
-  if (req.method !== 'GET') {
-    res.status(405).send('Method Not Allowed');
-    return;
-  }
-
-  res.status(200).json({
-    status: 'ok',
-    message: 'monomarket-stock endpoint stub. To be implemented later.'
-  });
-}
+module.exports = async (req, res) => {
+  res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+  res.setHeader('Cache-Control', 'public, s-maxage=60, max-age=0');
+  res.status(200).send('<?xml version=\"1.0\" encoding=\"UTF-8\"?><stock/>');
+};
