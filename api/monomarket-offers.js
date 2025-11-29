@@ -213,7 +213,10 @@ function buildOffersXml(importValues, controlMap) {
         if (xmlName === "height" || xmlName === "width" || xmlName === "length") {
           coreValue = convertToCm(coreValue, units);
         }
-
+        if (xmlName === "weight") {
+          coreValue = String(coreValue).replace(/,/g, ".");
+        }
+        
         if (xmlName === "code") {
           codeLine = "      <code>" + escapeXml(coreValue) + "</code>";
           return;
@@ -255,18 +258,25 @@ function buildOffersXml(importValues, controlMap) {
         return;
       }
 
-     const paramNameDefault = xmlName; let valStr = String(value);
-if (units) { valStr = valStr.replace(/,/g, "."); valStr = valStr + " " + String(units).trim(); }
-if (valStr === "") return;
+  const paramNameDefault = xmlName;
+  let valStr = String(value).trim();
 
-      paramLines.push(
-        "        <param name=\"" +
-          escapeXml(paramNameDefault) +
-          "\">" +
-          escapeXml(valStr) +
-          "</param>"
-      );
-    });
+  if (units) {
+    // только если есть единицы измерения, меняем запятую на точку
+    valStr = valStr.replace(/,/g, ".");
+    valStr = valStr + " " + String(units).trim();
+  }
+
+  if (valStr === "") return;
+
+  paramLines.push(
+    "        <param name=\"" +
+      escapeXml(paramNameDefault) +
+      "\">" +
+      escapeXml(valStr) +
+      "</param>"
+  );
+
 
     if (
       !codeLine &&
