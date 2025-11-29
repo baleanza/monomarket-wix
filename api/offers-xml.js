@@ -310,34 +310,43 @@ function buildOffersXml(importValues, controlMap) {
   return xml.join("\n");
 }
 
+let cachedXml = null; let cachedAt = 0; const CACHE_TTL_MS = 3 * 60 * 60 * 1000; // 3 години
+
 module.exports = async (req, res) => {
-  if (req.method !== "GET") {
-    res.status(405).send("Method Not Allowed");
-    return;
-  }
+if (req.method !== "GET") {
+res.status(405).send("Method Not Allowed");
+return;
+}
+const now = Date.now();
+if (cachedXml && now - cachedAt < CACHE_TTL_MS) {
+res.setHeader("Content-Type", "application/xml; charset=utf-8");
+res.status(200).send(cachedXml);
+return;
+}
+try {
+const spreadsheetId = process.env.SPREADSHEET_ID;
+const sheets = await getSheetsClient();
+const importValues = await getSheetValues(
+  sheets,
+  spreadsheetId,
+  "'" + IMPORT_SHEET_NAME + "'"
+);
+const controlValues = await getSheetValues(
+  sheets,
+  spreadsheetId,
+  "'" + CONTROL_SHEET_NAME + "'"
+);
 
-  try {
-    const spreadsheetId = process.env.SPREADSHEET_ID;
-    const sheets = await getSheetsClient();
+const controlMap = buildControlMap(controlValues);
+const xml = buildOffersXml(importValues, controlMap);
 
-    const importValues = await getSheetValues(
-      sheets,
-      spreadsheetId,
-      "'" + IMPORT_SHEET_NAME + "'"
-    );
-    const controlValues = await getSheetValues(
-      sheets,
-      spreadsheetId,
-      "'" + CONTROL_SHEET_NAME + "'"
-    );
+cachedXml = xml;
+cachedAt = now;
 
-    const controlMap = buildControlMap(controlValues);
-    const xml = buildOffersXml(importValues, controlMap);
-
-    res.setHeader("Content-Type", "application/xml; charset=utf-8");
-    res.status(200).send(xml);
-  } catch (err) {
-    console.error(err);
-    res.status(500).send("Internal Server Error");
-  }
+res.setHeader("Content-Type", "application/xml; charset=utf-8");
+res.status(200).send(xml);
+} catch (err) {
+console.error(err);
+res.status(500).send("Internal Server Error");
+}
 };
