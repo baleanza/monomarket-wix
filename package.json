@@ -1,18 +1,13 @@
 {
-  "name": "monomarket-murkit-feed",
+  "name": "monomarket-vercel-feed",
   "version": "1.0.0",
-  "description": "Vercel serverless XML offers feed generator from Google Sheets (Murkit format)",
-  "main": "api/monomarket-offers.js",
-  "type": "module",
+  "private": true,
   "scripts": {
-    "test": "jest",
-    "lint": "eslint ."
+    "dev": "vercel dev",
+    "start": "node ./api/monomarket-offers.js",
+    "test": "node ./tests/helpers.test.js"
   },
   "dependencies": {
-    "googleapis": "^133.0.0",
-    "xmlbuilder2": "^4.0.2"
-  },
-  "devDependencies": {
-    "jest": "^29.7.0"
+    "googleapis": "^119.0.0"
   }
 }
