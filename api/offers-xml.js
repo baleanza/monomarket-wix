@@ -307,8 +307,7 @@ function buildOffersXml(importValues, controlMap) {
   xml.push("  </offers>");
   xml.push("</" + ROOT_TAG + ">");
 
-  return xml.join("
-");
+  return xml.join("\n");
 }
 
 module.exports = async (req, res) => {
