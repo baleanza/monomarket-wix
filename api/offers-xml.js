@@ -160,7 +160,7 @@ function buildControlMap(values) {
 function buildOffersXml(importValues, controlMap) {
   if (importValues.length < 2) {
     return [
-      "<?xml version="1.0" encoding="UTF-8"?>",
+      "<?xml version='1.0' encoding='UTF-8'?>",
       "<" + ROOT_TAG + ">",
       "  <offers/>",
       "</" + ROOT_TAG + ">"
@@ -172,7 +172,7 @@ function buildOffersXml(importValues, controlMap) {
   const rows = importValues.slice(1);
 
   const xml = [];
-  xml.push("<?xml version="1.0" encoding="UTF-8"?>");
+  xml.push("<?xml version='1.0' encoding='UTF-8'?>");
   xml.push("<" + ROOT_TAG + ">");
   xml.push("  <offers>");
 
