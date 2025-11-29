@@ -1,5 +1,5 @@
 {
-"name": "monomarket-api",
+"name": "baleanza-api",
 "version": "1.0.0",
 "dependencies": {
 "googleapis": "^105.0.0"
