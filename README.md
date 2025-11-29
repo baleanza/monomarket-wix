@@ -1,91 +1,45 @@
-# Monomarket Murkit XML Feed
+# monomarket-vercel-feed
 
-Serverless-ендпоинт для генерації XML-фіду `offers` (формат Murkit) з Google Sheets та кешуванням у Google Drive.
+Serverless feed generator for Monomarket / Murkit. Reads Google Sheets, builds `monomarket-offers.xml` and stores it in Google Drive. The stored file is used as cached static feed and is regenerated no more often than every 2 hours (configurable).
 
-## Структура проекту
+## Files of interest
+- `api/monomarket-offers.js` — main endpoint
+- `api/monomarket-stock.js` — stub for stock feed (to implement later)
+- `lib/sheetsClient.js` — read Google Sheets via service account
+- `lib/driveClient.js` — read/write file to Google Drive
+- `lib/feedBuilder.js` — build XML from sheet arrays
+- `lib/helpers.js` — unit conversion, escaping, booleans
+- `tests/helpers.test.js` — basic unit tests
 
-- `api/monomarket-offers.js` – основний endpoint XML-фіду
-- `api/monomarket-stock.js` – заглушка під майбутній stock-фід
-- `lib/sheetsClient.js` – клієнт Google Sheets API
-- `lib/driveClient.js` – клієнт Google Drive API
-- `lib/feedBuilder.js` – збірка XML з даних таблиці
-- `lib/helpers.js` – утиліти (escape, конвертація одиниць, boolean → Так/Ні)
-- `tests/*` – unit-тести (Jest)
-- `package.json`
+## Environment variables
+Set following env vars in Vercel:
+- `GOOGLE_SERVICE_ACCOUNT_KEY` — full JSON key (paste contents)
+- `SPREADSHEET_ID` — Google Sheets ID
+- `GOOGLE_SERVICE_ACCOUNT_EMAIL` — optional (for convenience)
+- `CACHE_TTL_SECONDS` — optional, default 7200
+- `API_KEY` — optional, protect endpoint by `x-api-key` header
 
-## Google Service Account
+## Setup (quick)
+1. Create Google Cloud project, enable Sheets API & Drive API.
+2. Create Service Account and JSON key. Copy JSON into `GOOGLE_SERVICE_ACCOUNT_KEY`.
+3. Share the spreadsheet with service account email (Viewer or Editor). If you want to allow the function to write the XML file to Drive, grant Drive permission.
+4. Deploy to Vercel, set environment variables.
+5. Add CNAME in your DNS to point a subdomain to Vercel if you want `feed.yourdomain.com`.
 
-1. У Google Cloud Console створіть **Service Account**.
-2. Створіть ключ у форматі JSON та завантажте.
-3. Скопіюйте JSON в env змінну `GOOGLE_SERVICE_ACCOUNT_KEY` (повна JSON-строка).
-4. Візьміть email сервіс-акаунта (`...@...gserviceaccount.com`) і розшарте на нього:
-   - Google Spreadsheet (роль **Viewer/Reader** або вище).
-   - Google Drive (папка або конкретний файл, якщо створюєте наперед).
+## How it works
+- On request `/api/monomarket-offers`, the function checks Drive for `monomarket-offers.xml`.
+- If the file exists and is younger than `CACHE_TTL_SECONDS`, it returns the file contents.
+- Otherwise it reads `Import` and `Feed Control List` sheets, builds the XML, uploads/updates the file on Drive, and returns the XML.
 
-## Структура Google Sheets
+## Units & rules
+- Units for length/weight are expected in Ukrainian: `мм`, `см`, `м`, `г`, `кг`.
+- For numeric conversions (height/width/length/weight) the function replaces comma with dot if units are present, then converts:
+  - mm → cm: /10
+  - m → cm: *100
+  - g → kg: /1000
+- Output lengths in cm and weight in kg, rounded to 2 decimals.
 
-### Лист `Import`
-
-- 1 рядок – заголовки (`code`, `title`, `vendor_code`, `brand`, `barcode`, `weight`, `height`, `width`, `length`, `description`, `image_1`, `image_2`, …).
-- Дані з 2-го рядка – товари.
-
-### Лист `Feed Control List`
-
-- A: `Import field`
-- B: `Enabled` (`TRUE/FALSE/1/0`)
-- C: `Feed name` (xml-тег або `tags`, `image_1`…)
-- D: `Units` (`мм`, `см`, `м`, `г`, `кг` або порожньо)
-
-## Env змінні
-
-У Vercel → Project → Settings → Environment Variables:
-
-- `GOOGLE_SERVICE_ACCOUNT_KEY` – повний JSON ключ сервіс-акаунта.
-- `SPREADSHEET_ID` – ID Google Spreadsheet.
-- `GOOGLE_SERVICE_ACCOUNT_EMAIL` – email сервіс-акаунта (для довідки).
-- `CACHE_TTL_SECONDS` – опціонально, TTL кешу в секундах (за замовчуванням `7200`).
-- `API_KEY` – опціонально, якщо треба закрити endpoint по ключу (`x-api-key`).
-
-## Поведінка / кешування
-
-- `GET /api/monomarket-offers`
-  - Якщо у Google Drive існує `monomarket-offers.xml` і він свіжіший, ніж `CACHE_TTL_SECONDS`, файл читається та повертається напряму.
-  - Якщо файл старий або відсутній – зчитується таблиця, генерується XML, файл перезаписується у Drive, і результат повертається.
-- HTTP заголовки:
-  - `Content-Type: application/xml; charset=utf-8`
-  - `Cache-Control: public, s-maxage=7200, max-age=0` (або з урахуванням `CACHE_TTL_SECONDS`).
-
-## Захист API
-
-Якщо задано `API_KEY`, endpoint `GET /api/monomarket-offers` вимагає заголовок:
-x-api-key: <ваш_API_KEY>
-Інакше повертається `401 Unauthorized`.
-
-## Деплой на Vercel
-
-1. Створіть репозиторій з цією структурою.
-2. Залогінтеся в Vercel та імпортуйте репозиторій.
-3. Налаштуйте env variables.
-4. Задеплойте.
-5. Перевірка:
-   - `GET https://<your-project>.vercel.app/api/monomarket-offers`
-   - Додайте `x-api-key`, якщо використовується.
-
-## Оновлення файлу в Drive
-
-- Файл `monomarket-offers.xml` створюється автоматично при першому запиті.
-- Щоб зробити його публічним:
-  - У Google Drive змініть доступ файлу на “Anyone with the link – Viewer”.
-  - Або залиште закритим і віддавайте тільки через Vercel-проксі.
-
-## Force перегенерація
-
-Опційно можна додати `/api/rebuild` endpoint, який:
-- Ігнорує кеш.
-- Завжди перечитує Google Sheets і перезаписує XML у Drive.
-- Захищений `API_KEY` (обов’язковий).
-
-## Тести
-npm install
-npm test
-
+## Tests
+Run local tests:
+```bash
+node tests/helpers.test.js
