@@ -1,177 +1,57 @@
-import { google } from 'googleapis';
-import { getSheetsClient } from '../lib/sheetsClient.js';
-import { getDriveClient } from '../lib/driveClient.js';
-import { buildOffersXml } from '../lib/feedBuilder.js';
+// api/monomarket-offers.js
+const { readSheets } = require('../lib/sheetsClient');
+const { getDrive, findFileByName, readFileContent, uploadOrUpdateFile } = require('../lib/driveClient');
+const { buildControlMap, buildOffersXml } = require('../lib/feedBuilder');
 
-const CACHE_TTL_SECONDS = parseInt(process.env.CACHE_TTL_SECONDS || '7200', 10);
-const DRIVE_FILE_NAME = 'monomarket-offers.xml';
+const FILE_NAME = 'monomarket-offers.xml';
+const DEFAULT_TTL = parseInt(process.env.CACHE_TTL_SECONDS || '7200', 10);
 
-function requireEnv(varName) {
-  const value = process.env[varName];
-  if (!value) {
-    console.error(`Missing required env var: ${varName}`);
-  }
-  return value;
+function requireEnv(name) {
+  if (!process.env[name]) throw new Error(`${name} is required`);
+  return process.env[name];
 }
 
-function checkApiKey(req) {
-  const apiKey = process.env.API_KEY;
-  if (!apiKey) return true;
-  const headerKey = req.headers['x-api-key'];
-  return headerKey && headerKey === apiKey;
-}
-
-async function ensureAuth() {
-  const keyJson = requireEnv('GOOGLE_SERVICE_ACCOUNT_KEY');
-  const spreadsheetId = requireEnv('SPREADSHEET_ID');
-  if (!keyJson || !spreadsheetId) {
-    throw new Error('GOOGLE_SERVICE_ACCOUNT_KEY or SPREADSHEET_ID not configured');
-  }
-
-  let keyObj;
+module.exports = async (req, res) => {
   try {
-    keyObj = JSON.parse(keyJson);
-  } catch (e) {
-    console.error('Failed to parse GOOGLE_SERVICE_ACCOUNT_KEY JSON', e);
-    throw e;
-  }
-
-  const jwtClient = new google.auth.JWT(
-    keyObj.client_email,
-    null,
-    keyObj.private_key,
-    [
-      'https://www.googleapis.com/auth/spreadsheets.readonly',
-      'https://www.googleapis.com/auth/drive.file'
-    ]
-  );
-
-  await jwtClient.authorize();
-
-  const sheets = getSheetsClient(jwtClient);
-  const drive = getDriveClient(jwtClient);
-
-  return { sheets, drive, spreadsheetId };
-}
-
-async function getOrCreateDriveFile(drive) {
-  const res = await drive.files.list({
-    q: `name='${DRIVE_FILE_NAME}' and trashed = false`,
-    fields: 'files(id, name, modifiedTime)',
-    spaces: 'drive'
-  });
-
-  const files = res.data.files || [];
-  if (files.length > 0) {
-    return files[0];
-  }
-
-  const createRes = await drive.files.create({
-    requestBody: {
-      name: DRIVE_FILE_NAME,
-      mimeType: 'application/xml'
+    // optional API key protection
+    const API_KEY = process.env.API_KEY;
+    if (API_KEY) {
+      const key = req.headers['x-api-key'] || req.query.api_key;
+      if (key !== API_KEY) return res.status(401).send('Unauthorized');
     }
-  });
 
-  return createRes.data;
-}
+    // env checks
+    requireEnv('GOOGLE_SERVICE_ACCOUNT_KEY');
+    requireEnv('SPREADSHEET_ID');
 
-async function readDriveFileContent(drive, fileId) {
-  const res = await drive.files.get(
-    {
-      fileId,
-      alt: 'media'
-    },
-    { responseType: 'arraybuffer' }
-  );
-  return Buffer.from(res.data).toString('utf-8');
-}
+    const drive = await getDrive();
+    const existing = await findFileByName(drive, FILE_NAME);
 
-async function writeDriveFileContent(drive, fileId, xml) {
-  await drive.files.update({
-    fileId,
-    media: {
-      mimeType: 'application/xml',
-      body: xml
-    }
-  });
-}
-
-async function readSheetData(sheets, spreadsheetId) {
-  const importRes = await sheets.spreadsheets.values.get({
-    spreadsheetId,
-    range: 'Import!A1:ZZ',
-  });
-
-  const controlRes = await sheets.spreadsheets.values.get({
-    spreadsheetId,
-    range: 'Feed Control List!A1:D',
-  });
-
-  const importValues = importRes.data.values || [];
-  const controlValues = controlRes.data.values || [];
-
-  return { importValues, controlValues };
-}
-
-function isFresh(modifiedTime) {
-  if (!modifiedTime) return false;
-  const modified = new Date(modifiedTime).getTime();
-  const now = Date.now();
-  return now - modified < CACHE_TTL_SECONDS * 1000;
-}
-
-export default async function handler(req, res) {
-  if (req.method !== 'GET') {
-    res.status(405).send('Method Not Allowed');
-    return;
-  }
-
-  if (!checkApiKey(req)) {
-    res.status(401).send('Unauthorized');
-    return;
-  }
-
-  try {
-    const { sheets, drive, spreadsheetId } = await ensureAuth();
-
-    const fileMeta = await getOrCreateDriveFile(drive);
-
-    if (fileMeta.id && isFresh(fileMeta.modifiedTime)) {
-      try {
-        const xml = await readDriveFileContent(drive, fileMeta.id);
-
-        res.setHeader('Content-Type', "application/xml; charset=utf-8");
-        res.setHeader(
-          'Cache-Control',
-          `public, s-maxage=${CACHE_TTL_SECONDS}, max-age=0`
-        );
-        res.status(200).send(xml);
-        return;
-      } catch (e) {
-        console.error('Failed to read cached XML from Drive, will regenerate', e);
+    const now = Date.now();
+    if (existing && existing.modifiedTime) {
+      const modified = new Date(existing.modifiedTime).getTime();
+      if ((now - modified) / 1000 < DEFAULT_TTL) {
+        const xml = await readFileContent(drive, existing.id);
+        res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+        res.setHeader('Cache-Control', `public, s-maxage=${DEFAULT_TTL}, max-age=0`);
+        return res.status(200).send(xml);
       }
     }
 
-    const { importValues, controlValues } = await readSheetData(sheets, spreadsheetId);
-    const xml = buildOffersXml(importValues, controlValues);
+    // rebuild from sheet
+    const { importValues, controlValues } = await readSheets(process.env.SPREADSHEET_ID);
+    const controlMap = buildControlMap(controlValues);
+    const xml = buildOffersXml(importValues, controlMap);
 
-    if (fileMeta.id) {
-      try {
-        await writeDriveFileContent(drive, fileMeta.id, xml);
-      } catch (e) {
-        console.error('Failed to write XML to Drive', e);
-      }
-    }
+    // upload or update file on Drive
+    await uploadOrUpdateFile(drive, FILE_NAME, xml);
 
-    res.setHeader('Content-Type', "application/xml; charset=utf-8");
-    res.setHeader(
-      'Cache-Control',
-      `public, s-maxage=${CACHE_TTL_SECONDS}, max-age=0`
-    );
-    res.status(200).send(xml);
+    res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+    res.setHeader('Cache-Control', `public, s-maxage=${DEFAULT_TTL}, max-age=0`);
+    return res.status(200).send(xml);
   } catch (err) {
-    console.error('Error in /api/monomarket-offers', err);
-    res.status(502).send('Bad Gateway');
+    console.error('feed error', err);
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    return res.status(502).send('Bad Gateway');
   }
-}
+};
