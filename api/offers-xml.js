@@ -244,12 +244,12 @@ function buildOffersXml(importValues, controlMap) {
 
         processed.forEach((item) => {
           paramLines.push(
-            "        <param name="" +
-              escapeXml(paramName) +
-              "">" +
-              escapeXml(item) +
-              "</param>"
-          );
+            "        <param name=\"" +
+            escapeXml(paramName) +
+      "\">" +
+      escapeXml(item) +
+      "</param>"
+  );
         });
 
         return;
