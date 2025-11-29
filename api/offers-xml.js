@@ -44,11 +44,11 @@ function convertToCm(value, units) {
 
   const u = (units || "").toString().toLowerCase().trim();
 
-  if (u === "Ð¼Ð¼" || u === "mm") {
+  if (u === "мм" || u === "mm") {
     num = num / 10;
-  } else if (u === "ÑÐ¼" || u === "cm") {
+  } else if (u === "см" || u === "cm") {
     // already cm
-  } else if (u === "Ð¼" || u === "m") {
+  } else if (u === "м" || u === "m") {
     num = num * 100;
   }
 
@@ -60,17 +60,17 @@ function isBooleanLike(val) {
   if (val === true || val === false) return true;
   const s = String(val).trim().toLowerCase();
   if (s === "true" || s === "false" || s === "1" || s === "0") return true;
-  if (s === "Ñ‚Ð°Ðº" || s === "Ð½Ñ–" || s === "Ð´Ð°" || s === "Ð½ÐµÑ‚") return true;
+  if (s === "так" || s === "ні" || s === "так" || s === "ні") return true;
   return false;
 }
 
 function booleanToUa(val) {
-  if (val === true) return "Ð¢Ð°Ðº";
-  if (val === false) return "ÐÑ–";
+  if (val === true) return "Так";
+  if (val === false) return "Ні";
 
   const s = String(val).trim().toLowerCase();
-  if (s === "true" || s === "1" || s === "Ñ‚Ð°Ðº" || s === "Ð´Ð°") return "Ð¢Ð°Ðº";
-  if (s === "false" || s === "0" || s === "Ð½Ñ–" || s === "Ð½ÐµÑ‚") return "ÐÑ–";
+  if (s === "true" || s === "1" || s === "так" || s === "так") return "Так";
+  if (s === "false" || s === "0" || s === "ні" || s === "ні") return "Ні";
 
   return "";
 }
@@ -95,7 +95,7 @@ function processTagParamValue(paramName, value, units) {
     valStr = valStr + " " + String(units).trim();
   }
 
-  if (paramName === "ÐžÑÐ¾Ð±Ð»Ð¸Ð²Ð¾ÑÑ‚Ñ–") {
+  if (paramName === "Особливості") {
     const parts = valStr.split(",");
     parts.forEach((p) => {
       const t = p.trim();
