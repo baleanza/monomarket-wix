@@ -110,7 +110,7 @@ function processTagParamValue(paramName, value, units) {
 
 async function getSheetsClient() {
   const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
-  const key = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
+  const key = (process.env.GOOGLE_SERVICE_ACCOUNT_KEY || "").replace(/\n/g, "\n");
   const scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"];
 
   const auth = new google.auth.JWT(email, null, key, scopes);
