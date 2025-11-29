@@ -36,7 +36,7 @@ function escapeXml(value) {
 function convertToCm(value, units) {
   if (value === null || value === undefined) return "";
 
-  const str = String(value).replace(",", ".").trim();
+  const str = String(value).replace(/,/g, ".").trim();
   let num = parseFloat(str);
   if (isNaN(num)) {
     return value;
@@ -256,7 +256,7 @@ function buildOffersXml(importValues, controlMap) {
       }
 
       const paramNameDefault = xmlName;
-      let valStr = String(value);
+      let valStr = String(value).replace(/,/g, ".");
 
       if (units) {
         valStr = valStr + " " + String(units).trim();
