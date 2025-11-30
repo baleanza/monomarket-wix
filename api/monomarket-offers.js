@@ -56,10 +56,18 @@ async function ensureAuth() {
 }
 
 async function getOrCreateDriveFile(drive) {
+  const conditions = [`name='${DRIVE_FILE_NAME}'`, 'trashed = false'];
+
+  if (SHARED_DRIVE_FOLDER_ID) {
+    conditions.push(`'${SHARED_DRIVE_FOLDER_ID}' in parents`);
+  }
+
   const res = await drive.files.list({
-    q: `name='${DRIVE_FILE_NAME}' and trashed = false`,
+    q: conditions.join(' and '),
     fields: 'files(id, name, modifiedTime)',
-    spaces: 'drive'
+    spaces: 'drive',
+    includeItemsFromAllDrives: true,
+    supportsAllDrives: true
   });
 
   const files = res.data.files || [];
@@ -67,11 +75,18 @@ async function getOrCreateDriveFile(drive) {
     return files[0];
   }
 
+  const requestBody = {
+    name: DRIVE_FILE_NAME,
+    mimeType: 'application/xml'
+  };
+
+  if (SHARED_DRIVE_FOLDER_ID) {
+    requestBody.parents = [SHARED_DRIVE_FOLDER_ID];
+  }
+
   const createRes = await drive.files.create({
-    requestBody: {
-      name: DRIVE_FILE_NAME,
-      mimeType: 'application/xml'
-    }
+    requestBody,
+    supportsAllDrives: true
   });
 
   return createRes.data;
@@ -81,7 +96,8 @@ async function readDriveFileContent(drive, fileId) {
   const res = await drive.files.get(
     {
       fileId,
-      alt: 'media'
+      alt: 'media',
+      supportsAllDrives: true
     },
     { responseType: 'arraybuffer' }
   );
@@ -94,19 +110,20 @@ async function writeDriveFileContent(drive, fileId, xml) {
     media: {
       mimeType: 'application/xml',
       body: xml
-    }
+    },
+    supportsAllDrives: true
   });
 }
 
 async function readSheetData(sheets, spreadsheetId) {
   const importRes = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: 'Import!A1:ZZ',
+    range: 'Import!A1:ZZ'
   });
 
   const controlRes = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: 'Feed Control List!A1:D',
+    range: 'Feed Control List!A1:D'
   });
 
   const importValues = importRes.data.values || [];
