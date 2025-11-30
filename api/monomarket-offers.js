@@ -56,14 +56,16 @@ async function ensureAuth() {
 }
 
 async function getOrCreateDriveFile(drive) {
-  const conditions = [`name='${DRIVE_FILE_NAME}'`, 'trashed = false'];
-
-  if (SHARED_DRIVE_FOLDER_ID) {
-    conditions.push(`'${SHARED_DRIVE_FOLDER_ID}' in parents`);
+  if (!SHARED_DRIVE_FOLDER_ID) {
+    throw new Error('SHARED_DRIVE_FOLDER_ID is not set');
   }
 
   const res = await drive.files.list({
-    q: conditions.join(' and '),
+    q: [
+      `name='${DRIVE_FILE_NAME}'`,
+      `'${SHARED_DRIVE_FOLDER_ID}' in parents`,
+      'trashed = false'
+    ].join(' and '),
     fields: 'files(id, name, modifiedTime)',
     spaces: 'drive',
     includeItemsFromAllDrives: true,
@@ -75,17 +77,12 @@ async function getOrCreateDriveFile(drive) {
     return files[0];
   }
 
-  const requestBody = {
-    name: DRIVE_FILE_NAME,
-    mimeType: 'application/xml'
-  };
-
-  if (SHARED_DRIVE_FOLDER_ID) {
-    requestBody.parents = [SHARED_DRIVE_FOLDER_ID];
-  }
-
   const createRes = await drive.files.create({
-    requestBody,
+    requestBody: {
+      name: DRIVE_FILE_NAME,
+      mimeType: 'application/xml',
+      parents: [SHARED_DRIVE_FOLDER_ID]
+    },
     supportsAllDrives: true
   });
 
@@ -123,7 +120,7 @@ async function readSheetData(sheets, spreadsheetId) {
 
   const controlRes = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: 'Feed Control List!A1:D'
+    range: 'Feed Control List!A1:E'
   });
 
   const importValues = importRes.data.values || [];
@@ -153,34 +150,37 @@ export default async function handler(req, res) {
   try {
     const { sheets, drive, spreadsheetId } = await ensureAuth();
 
-//    const fileMeta = await getOrCreateDriveFile(drive);
+    const fileMeta = await getOrCreateDriveFile(drive);
 
-//   if (fileMeta.id && isFresh(fileMeta.modifiedTime)) {
-//      try {
-//        const xml = await readDriveFileContent(drive, fileMeta.id);
+    if (fileMeta.id && isFresh(fileMeta.modifiedTime)) {
+      try {
+        const xml = await readDriveFileContent(drive, fileMeta.id);
 
-//        res.setHeader('Content-Type', "application/xml; charset=utf-8");
-//        res.setHeader(
-//          'Cache-Control',
-//          `public, s-maxage=${CACHE_TTL_SECONDS}, max-age=0`
-//        );
-//        res.status(200).send(xml);
-//        return;
-//      } catch (e) {
-//        console.error('Failed to read cached XML from Drive, will regenerate', e);
-//      }
-//    }
+        res.setHeader('Content-Type', "application/xml; charset=utf-8");
+        res.setHeader(
+          'Cache-Control',
+          `public, s-maxage=${CACHE_TTL_SECONDS}, max-age=0`
+        );
+        res.status(200).send(xml);
+        return;
+      } catch (e) {
+        console.error('Failed to read cached XML from Drive, will regenerate', e);
+      }
+    }
 
-    const { importValues, controlValues } = await readSheetData(sheets, spreadsheetId);
+    const { importValues, controlValues } = await readSheetData(
+      sheets,
+      spreadsheetId
+    );
     const xml = buildOffersXml(importValues, controlValues);
 
-//    if (fileMeta.id) {
-//      try {
-//        await writeDriveFileContent(drive, fileMeta.id, xml);
-//      } catch (e) {
-//        console.error('Failed to write XML to Drive', e);
-//     }
-//    }
+    if (fileMeta.id) {
+      try {
+        await writeDriveFileContent(drive, fileMeta.id, xml);
+      } catch (e) {
+        console.error('Failed to write XML to Drive', e);
+      }
+    }
 
     res.setHeader('Content-Type', "application/xml; charset=utf-8");
     res.setHeader(
