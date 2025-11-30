@@ -5,6 +5,7 @@ import { buildOffersXml } from '../lib/feedBuilder.js';
 
 const CACHE_TTL_SECONDS = parseInt(process.env.CACHE_TTL_SECONDS || '7200', 10);
 const DRIVE_FILE_NAME = 'monomarket-offers.xml';
+const SHARED_DRIVE_FOLDER_ID = process.env.SHARED_DRIVE_FOLDER_ID || null;
 
 function requireEnv(varName) {
   const value = process.env[varName];
