@@ -8,6 +8,9 @@
     "test": "node ./tests/helpers.test.js"
   },
   "dependencies": {
-    "googleapis": "^119.0.0"
+    "googleapis": "^116.0.0"
+  },
+  "engines": {
+    "node": "18.x"
   }
 }
