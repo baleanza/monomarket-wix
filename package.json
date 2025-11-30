@@ -9,8 +9,8 @@
     "lint": "eslint ."
   },
   "dependencies": {
-    "googleapis": "^133.0.0",
-    "xmlbuilder2": "^4.0.2"
+  "googleapis": "^133.0.0",
+  "xmlbuilder2": "^4.0.1"
   },
   "devDependencies": {
     "jest": "^29.7.0"
