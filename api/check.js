@@ -2,6 +2,7 @@
 import { ensureAuth, cleanPrice } from '../lib/sheetsClient.js'; 
 import { getInventoryBySkus } from '../lib/wixClient.js';
 
+// readSheetData вынесен из handler, так как он использует sheets
 async function readSheetData(sheets, spreadsheetId) {
     const importRes = await sheets.spreadsheets.values.get({
         spreadsheetId,
@@ -19,6 +20,7 @@ async function readSheetData(sheets, spreadsheetId) {
 
 export default async function handler(req, res) {
   try {
+    // Авторизация Google Sheets
     const { sheets, spreadsheetId } = await ensureAuth();
 
     const { importValues, controlValues } = await readSheetData(
@@ -60,7 +62,7 @@ export default async function handler(req, res) {
     colSku = headers.indexOf(fieldMap['sku'] || 'SKU'); 
     colPrice = headers.indexOf(fieldMap['price'] || 'Price');
 
-    if (colSku === -1) return res.send('<h1>Помилка: Не знайдено колонку SKU</h1>');
+    if (colSku === -1) return res.status(500).send('<h1>Помилка: Не знайдено колонку SKU</h1>');
 
     const skus = [];
     const tableData = [];
