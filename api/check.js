@@ -1,17 +1,13 @@
-// api/check.js (Оновлений файл)
+// api/check.js
 import { ensureAuth, cleanPrice } from '../lib/sheetsClient.js'; 
 import { getInventoryBySkus } from '../lib/wixClient.js';
 
-// ... (функції, які були перенесені до sheetsClient, тут видалено) ...
-
 // Функція для читання даних з Google Sheets
 async function readSheetData(sheets, spreadsheetId) {
-    // Читаємо основні дані
     const importRes = await sheets.spreadsheets.values.get({
         spreadsheetId,
         range: 'Import!A1:ZZ'
     });
-    // Читаємо настройки полів
     const controlRes = await sheets.spreadsheets.values.get({
         spreadsheetId,
         range: 'Feed Control List!A1:F'
@@ -24,10 +20,8 @@ async function readSheetData(sheets, spreadsheetId) {
 
 export default async function handler(req, res) {
   try {
-    // ТУТ ВИКОРИСТОВУЄМО ІМПОРТОВАНУ ФУНКЦІЮ ensureAuth
     const { sheets, spreadsheetId } = await ensureAuth();
 
-    // Читаємо дані (навіть без Delivery, якщо не потрібно)
     const { importValues, controlValues } = await readSheetData(
       sheets,
       spreadsheetId
@@ -37,7 +31,6 @@ export default async function handler(req, res) {
       return res.send('<h1>Таблиця пуста</h1>');
     }
 
-    // 2. Разбираем настройки колонок (детальніше, щоб знайти Name)
     const headers = importValues[0];
     const dataRows = importValues.slice(1);
     
@@ -58,7 +51,6 @@ export default async function handler(req, res) {
       }
     });
 
-    // Намагаємося знайти Назву по полях 'name', 'title' або 'Name'/'Title'
     const nameKeys = [fieldMap['name'], fieldMap['title'], 'Name', 'Title'].filter(Boolean);
     
     for (const key of nameKeys) {
@@ -71,7 +63,6 @@ export default async function handler(req, res) {
 
     if (colSku === -1) return res.send('<h1>Помилка: Не знайдено колонку SKU</h1>');
 
-    // 3. Збираємо дані для відображення
     const skus = [];
     const tableData = [];
 
@@ -87,11 +78,10 @@ export default async function handler(req, res) {
         sku: sku,
         name: colName > -1 ? row[colName] : '(Без назви)',
         priceRaw: priceVal,
-        price: cleanPrice(priceVal) // cleanPrice імпортований з sheetsClient
+        price: cleanPrice(priceVal)
       });
     });
 
-    // 4. Запитуємо сток з Wix
     const inventory = await getInventoryBySkus(skus);
     
     const stockMap = {};
@@ -99,7 +89,6 @@ export default async function handler(req, res) {
       stockMap[String(item.sku).trim()] = item;
     });
 
-    // 5. Генерируємо HTML
     let html = `
     <html>
       <head>
