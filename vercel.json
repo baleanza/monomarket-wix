@@ -4,7 +4,8 @@
     { "src": "api/*.js", "use": "@vercel/node" }
   ],
   "routes": [
-    { "src": "/", "dest": "/monomarket-offers.js" },
+    { "src": "/", "dest": "/api/monomarket-offers.js" }, 
+    
     { "src": "/check", "dest": "/api/check.js" },
     { "src": "/monomarket-offers", "dest": "/api/monomarket-offers.js" },
     { "src": "/monomarket-stock", "dest": "/api/monomarket-stock.js" },
