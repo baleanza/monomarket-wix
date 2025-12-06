@@ -8,9 +8,9 @@
     
     { "src": "/check", "dest": "/api/check.js" }, 
     
-    { "src": "/api/monomarket-offers", "dest": "/api/monomarket-offers.js" },
-    { "src": "/api/monomarket-stock", "dest": "/api/monomarket-stock.js" },
-    { "src": "/api/murkit-webhook", "dest": "/api/murkit-webhook.js" },
-    { "src": "/api/debug-wix", "dest": "/api/debug-wix.js" }
+    { "src": "/monomarket-offers", "dest": "/api/monomarket-offers.js" },
+    { "src": "/monomarket-stock", "dest": "/api/monomarket-stock.js" },
+    { "src": "/murkit-webhook", "dest": "/api/murkit-webhook.js" },
+    { "src": "/debug-wix", "dest": "/api/debug-wix.js" }
   ]
 }
