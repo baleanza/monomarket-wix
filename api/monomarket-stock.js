@@ -2,17 +2,11 @@
 import { google } from 'googleapis';
 import { getInventoryBySkus } from '../lib/wixClient.js';
 import { buildStockJson } from '../lib/stockFeedBuilder.js'; 
-import { ensureAuth, requireEnv } from '../lib/sheetsClient.js'; 
+import { ensureAuth, requireEnv, cleanPrice } from '../lib/sheetsClient.js'; // Добавлен cleanPrice для buildStockJson
 
 const CACHE_TTL_SECONDS = 300; 
 
-function checkApiKey(req) {
-  // requires API_KEY to be set in Vercel environment variables
-  const apiKey = requireEnv('API_KEY');
-  if (!apiKey) return true; 
-  const headerKey = req.headers['x-api-key'];
-  return headerKey && headerKey === apiKey;
-}
+// Функция checkApiKey удалена
 
 async function readSheetData(sheets, spreadsheetId) {
   const importRes = await sheets.spreadsheets.values.get({
@@ -43,10 +37,7 @@ export default async function handler(req, res) {
     return;
   }
 
-  if (!checkApiKey(req)) {
-    res.status(401).send('Unauthorized');
-    return;
-  }
+  // Проверка авторизации удалена
 
   try {
     const { sheets, spreadsheetId } = await ensureAuth();
@@ -54,8 +45,9 @@ export default async function handler(req, res) {
       sheets,
       spreadsheetId
     );
-
-    const jsonOutput = await buildStockJson(importValues, controlValues, deliveryValues, getInventoryBySkus);
+    
+    // Передаем cleanPrice в buildStockJson
+    const jsonOutput = await buildStockJson(importValues, controlValues, deliveryValues, getInventoryBySkus, cleanPrice);
 
     res.setHeader('Content-Type', "application/json; charset=utf-8");
     res.setHeader('Cache-Control', `public, s-maxage=${CACHE_TTL_SECONDS}, max-age=0`);
