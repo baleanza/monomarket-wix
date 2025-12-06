@@ -1,28 +1,56 @@
+// api/check.js (Оновлений файл)
+import { ensureAuth, cleanPrice } from '../lib/sheetsClient.js'; 
+import { getInventoryBySkus } from '../lib/wixClient.js';
+
+// ... (функції, які були перенесені до sheetsClient, тут видалено) ...
+
+// Функція для читання даних з Google Sheets
+async function readSheetData(sheets, spreadsheetId) {
+    // Читаємо основні дані
+    const importRes = await sheets.spreadsheets.values.get({
+        spreadsheetId,
+        range: 'Import!A1:ZZ'
+    });
+    // Читаємо настройки полів
+    const controlRes = await sheets.spreadsheets.values.get({
+        spreadsheetId,
+        range: 'Feed Control List!A1:F'
+    });
+    return { 
+        importValues: importRes.data.values || [], 
+        controlValues: controlRes.data.values || [] 
+    };
+}
 
 export default async function handler(req, res) {
   try {
+    // ТУТ ВИКОРИСТОВУЄМО ІМПОРТОВАНУ ФУНКЦІЮ ensureAuth
     const { sheets, spreadsheetId } = await ensureAuth();
 
-    // 1. Читаем данные из Таблицы
-    const [importRes, controlRes] = await Promise.all([
-      sheets.spreadsheets.values.get({ spreadsheetId, range: 'Import!A1:ZZ' }),
-      sheets.spreadsheets.values.get({ spreadsheetId, range: 'Feed Control List!A1:F' })
-    ]);
+    // Читаємо дані (навіть без Delivery, якщо не потрібно)
+    const { importValues, controlValues } = await readSheetData(
+      sheets,
+      spreadsheetId
+    );
 
-    // ... (стандартна перевірка довжини) ...
+    if (importValues.length < 2) {
+      return res.send('<h1>Таблиця пуста</h1>');
+    }
 
-    // 2. Разбираем настройки колонок
-    const headers = importRows[0];
-    const dataRows = importRows.slice(1);
+    // 2. Разбираем настройки колонок (детальніше, щоб знайти Name)
+    const headers = importValues[0];
+    const dataRows = importValues.slice(1);
     
-    // ... (стандартний розбір controlRows) ...
+    const controlHeaders = controlValues[0] || [];
+    const idxImportField = controlHeaders.indexOf('Import field');
+    const idxFeedName = controlHeaders.indexOf('Feed name');
 
     let colSku = -1;
-    let colName = -1; // <-- Змінено
+    let colName = -1;
     let colPrice = -1;
 
     const fieldMap = {}; 
-    controlRows.slice(1).forEach(row => {
+    controlValues.slice(1).forEach(row => {
       const imp = row[idxImportField];
       const feedName = row[idxFeedName];
       if (imp && feedName) {
@@ -43,9 +71,35 @@ export default async function handler(req, res) {
 
     if (colSku === -1) return res.send('<h1>Помилка: Не знайдено колонку SKU</h1>');
 
-    // ... (збір tableData та stockMap без змін) ...
+    // 3. Збираємо дані для відображення
+    const skus = [];
+    const tableData = [];
 
-    // 5. Генерируем HTML (Додаємо легенду)
+    dataRows.forEach(row => {
+      const sku = row[colSku] ? String(row[colSku]).trim() : '';
+      if (!sku) return;
+
+      skus.push(sku);
+      
+      const priceVal = colPrice > -1 ? row[colPrice] : '0';
+      
+      tableData.push({
+        sku: sku,
+        name: colName > -1 ? row[colName] : '(Без назви)',
+        priceRaw: priceVal,
+        price: cleanPrice(priceVal) // cleanPrice імпортований з sheetsClient
+      });
+    });
+
+    // 4. Запитуємо сток з Wix
+    const inventory = await getInventoryBySkus(skus);
+    
+    const stockMap = {};
+    inventory.forEach(item => {
+      stockMap[String(item.sku).trim()] = item;
+    });
+
+    // 5. Генерируємо HTML
     let html = `
     <html>
       <head>
@@ -112,7 +166,6 @@ export default async function handler(req, res) {
         qtyText = wixItem.quantity;
       }
 
-      // Виправлено: ціна округлена і додана валюта
       html += `
         <tr>
           <td>${item.sku}</td>
