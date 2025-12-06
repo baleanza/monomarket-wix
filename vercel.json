@@ -9,10 +9,10 @@
     { "src": "/api/murkit-webhook", "dest": "/api/murkit-webhook.js" },
     { "src": "/api/debug-wix", "dest": "/api/debug-wix.js" },
     
-    // ЭТО ПРАВИЛО ДОЛЖНО БЫТЬ ПЕРВЫМ
+
     { "src": "/check", "dest": "/api/check-table.js" },
     
-    // А ЭТОТ УНИВЕРСАЛЬНЫЙ ПЕРЕНАПРАВИТЕЛЬ — ПОСЛЕДНИМ
+
     { "src": "/(.*)", "dest": "/api/monomarket-offers.js" }
   ]
 }
