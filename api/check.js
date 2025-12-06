@@ -2,7 +2,6 @@
 import { ensureAuth, cleanPrice } from '../lib/sheetsClient.js'; 
 import { getInventoryBySkus } from '../lib/wixClient.js';
 
-// Функція для читання даних з Google Sheets
 async function readSheetData(sheets, spreadsheetId) {
     const importRes = await sheets.spreadsheets.values.get({
         spreadsheetId,
