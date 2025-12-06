@@ -7,6 +7,10 @@
     { "src": "/api/monomarket-offers", "dest": "/api/monomarket-offers.js" },
     { "src": "/api/monomarket-stock", "dest": "/api/monomarket-stock.js" },
     { "src": "/api/murkit-webhook", "dest": "/api/murkit-webhook.js" },
+    
+    // Добавляем тестовый маршрут
+    { "src": "/api/debug-wix", "dest": "/api/debug-wix.js" },
+    
     { "src": "/(.*)", "dest": "/api/monomarket-offers.js" }
   ]
 }
