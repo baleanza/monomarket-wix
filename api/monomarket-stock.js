@@ -63,6 +63,7 @@ export default async function handler(req, res) {
     
   } catch (e) {
     console.error('Error in /api/monomarket-stock', e);
+    // Додаємо детальну інформацію про помилку, щоб було легше діагностувати.
     res.status(502).json({ error: 'Bad Gateway', details: e.message });
   }
 }
