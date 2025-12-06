@@ -9,7 +9,6 @@
     { "src": "/api/murkit-webhook", "dest": "/api/murkit-webhook.js" },
     { "src": "/api/debug-wix", "dest": "/api/debug-wix.js" },
     
-    // Новая таблица
     { "src": "/check", "dest": "/api/check-table.js" },
     
     { "src": "/(.*)", "dest": "/api/monomarket-offers.js" }
