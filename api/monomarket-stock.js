@@ -2,14 +2,14 @@
 import { google } from 'googleapis';
 import { getInventoryBySkus } from '../lib/wixClient.js';
 import { buildStockJson } from '../lib/stockFeedBuilder.js'; 
-// ІМПОРТ ВИПРАВЛЕНО
 import { ensureAuth, requireEnv } from '../lib/sheetsClient.js'; 
 
 const CACHE_TTL_SECONDS = 300; 
 
 function checkApiKey(req) {
+  // requires API_KEY to be set in Vercel environment variables
   const apiKey = requireEnv('API_KEY');
-  if (!apiKey) return true;
+  if (!apiKey) return true; 
   const headerKey = req.headers['x-api-key'];
   return headerKey && headerKey === apiKey;
 }
@@ -63,7 +63,6 @@ export default async function handler(req, res) {
     
   } catch (e) {
     console.error('Error in /api/monomarket-stock', e);
-    // Додаємо детальну інформацію про помилку, щоб було легше діагностувати.
     res.status(502).json({ error: 'Bad Gateway', details: e.message });
   }
 }
