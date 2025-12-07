@@ -2,7 +2,7 @@ import { createWixOrder, getProductsBySkus } from '../lib/wixClient.js';
 import { ensureAuth } from '../lib/sheetsClient.js'; 
 
 // Constants
-const WIX_STORES_APP_ID = "215238eb-22a5-4c36-9e7b-e7c08025e04e"; // Correct ID for Wix Stores Catalog
+const WIX_STORES_APP_ID = "215238eb-22a5-4c36-9e7b-e7c08025e04e"; 
 
 // Basic Auth Check
 function checkAuth(req) {
@@ -93,7 +93,6 @@ export default async function handler(req, res) {
     const wixSkusToFetch = [];
     const itemsWithSku = murkitItems.map(item => {
         const mCode = String(item.code).trim();
-        // If map exists use it, otherwise fallback to code itself
         const wSku = codeToSkuMap[mCode] || mCode;
         if(wSku) wixSkusToFetch.push(wSku);
         return { ...item, wixSku: wSku };
@@ -103,17 +102,17 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: 'No valid SKUs found to fetch from Wix' });
     }
 
-    // 3. Fetch Products from Wix to get IDs and Check Stock
+    // 3. Fetch Products from Wix
     const wixProducts = await getProductsBySkus(wixSkusToFetch);
     
-    // 4. Build Line Items with Logic: SKU -> Product ID / Variant ID -> Check Stock
+    // 4. Build Line Items
     const lineItems = [];
     
     for (const item of itemsWithSku) {
         const requestedQty = parseInt(item.quantity || 1, 10);
         const targetSku = item.wixSku;
 
-        // Find the product that contains this SKU
+        // Find Product
         const productMatch = wixProducts.find(p => {
             if (String(p.sku) === targetSku) return true;
             if (p.variants) return p.variants.some(v => String(v.variant?.sku) === targetSku);
@@ -124,24 +123,21 @@ export default async function handler(req, res) {
             throw new Error(`Product with SKU '${targetSku}' (Murkit Code: ${item.code}) not found in Wix.`);
         }
 
-        // Determine if it is the main product or a variant
-        let catalogItemId = productMatch.id; // The main Product ID
+        let catalogItemId = productMatch.id; 
         let variantId = null;
         let stockData = productMatch.stock;
         let productName = productMatch.name;
 
-        // Check if SKU belongs to a specific variant
+        // Check if Variant
         if (String(productMatch.sku) !== targetSku && productMatch.variants) {
             const variantMatch = productMatch.variants.find(v => String(v.variant?.sku) === targetSku);
             if (variantMatch) {
-                variantId = variantMatch.variant.id; // Specific Variant ID
-                stockData = variantMatch.stock; // Variant specific stock
-                // Optionally append variant name options if needed, but 'original' name is usually parent name
+                variantId = variantMatch.variant.id; 
+                stockData = variantMatch.stock; 
             }
         }
 
-        // ** CRITICAL: STOCK CHECK **
-        // Assuming 'trackInventory' is true. If Wix returns inStock: false or quantity < requested
+        // Stock Check
         if (stockData.trackQuantity && (stockData.quantity < requestedQty)) {
              throw new Error(`Insufficient stock for SKU '${targetSku}'. Requested: ${requestedQty}, Available: ${stockData.quantity}`);
         }
@@ -149,18 +145,21 @@ export default async function handler(req, res) {
              throw new Error(`SKU '${targetSku}' is marked as Out of Stock in Wix.`);
         }
 
-        // Construct Line Item
-        const priceStr = fmtPrice(item.price);
-        
-        const lineItem = {
+        // Construct Catalog Reference
+        const catalogRef = {
+            catalogItemId: catalogItemId,
+            appId: WIX_STORES_APP_ID
+        };
+        // ONLY add options if we have a variantId
+        if (variantId) {
+            catalogRef.options = { variantId: variantId };
+        }
+
+        lineItems.push({
             quantity: requestedQty,
-            catalogReference: {
-                catalogItemId: catalogItemId,
-                appId: WIX_STORES_APP_ID,
-                options: variantId ? { variantId: variantId } : {}
-            },
+            catalogReference: catalogRef,
             productName: {
-                original: productName // From Wix, as requested
+                original: productName 
             },
             itemType: {
                 preset: "PHYSICAL"
@@ -170,30 +169,26 @@ export default async function handler(req, res) {
                 shippable: true
             },
             price: {
-                amount: priceStr // Wix V2 override price
+                amount: fmtPrice(item.price)
             }
-        };
-
-        lineItems.push(lineItem);
+        });
     }
 
-    // 5. Prepare Order Totals & Info
-    const currency = "UAH"; // Adjust if needed
+    // 5. Prepare Order Info
+    const currency = "UAH";
     const clientName = getFullName(murkitData.client?.name);
     const recipientName = getFullName(murkitData.recipient?.name);
     const phone = String(murkitData.client?.phone || murkitData.recipient?.phone || "").replace(/\D/g,'');
     const email = murkitData.client?.email || "monomarket@mywoodmood.com";
 
-    // Mapping Delivery
     const deliveryTitle = `${murkitData.deliveryType || 'Delivery'} (${murkitData.delivery?.settlementName || ''})`;
     const shippingAddress = {
         country: "UA",
         city: String(murkitData.delivery?.settlementName || "City"),
-        addressLine: `Nova Poshta: ${murkitData.delivery?.warehouseNumber || '1'}`,
-        postalCode: "00000" // Required field for some validations
+        addressLine: `Nova Poshta: ${murkitData.delivery?.warehouseNumber || '1'}`, 
+        postalCode: "00000"
     };
 
-    // Calculate Totals (Murkit sends final sums, we trust them for the override)
     const priceSummary = {
         subtotal: { amount: fmtPrice(murkitData.sum), currency },
         shipping: { amount: "0.00", currency }, 
@@ -202,16 +197,20 @@ export default async function handler(req, res) {
         total: { amount: fmtPrice(murkitData.sum), currency }
     };
 
-    // 6. Final Payload
     const wixOrderPayload = {
         channelInfo: {
-            type: "API",
+            type: "OTHER_PLATFORM", // CHANGED from 'API' to a valid enum-like value
             externalId: String(murkitData.number)
         },
         lineItems: lineItems,
         priceSummary: priceSummary,
         billingInfo: {
-            address: { ...shippingAddress, addressLine: "Client Address" }, // Simplified
+            address: { 
+                country: "UA", 
+                city: String(murkitData.delivery?.settlementName || "City"),
+                addressLine: "Client Address", 
+                postalCode: "00000" 
+            },
             contactDetails: {
                 firstName: clientName.firstName,
                 lastName: clientName.lastName,
@@ -234,11 +233,12 @@ export default async function handler(req, res) {
             cost: { price: { amount: "0.00", currency } }
         },
         buyerInfo: { email: email },
-        paymentStatus: (murkitData.payment_status === 'paid' || String(murkitData.paymentType).includes('mono')) ? "PAID" : "NOT_PAID",
-        currency: currency
+        paymentStatus: (murkitData.payment_status === 'paid' || String(murkitData.paymentType || '').includes('paid')) ? "PAID" : "NOT_PAID",
+        currency: currency,
+        weightUnit: "KG" // Added explicitly
     };
 
-    // 7. Send to Wix
+    // 6. Create Order
     const createdOrder = await createWixOrder(wixOrderPayload);
     
     res.status(200).json({ 
