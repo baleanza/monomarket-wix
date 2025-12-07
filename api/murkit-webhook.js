@@ -93,7 +93,6 @@ export default async function handler(req, res) {
 
   try {
     const murkitData = req.body;
-    // Убедимся, что ID заказа всегда строка
     const murkitOrderId = String(murkitData.number || murkitData.id); 
     console.log('New Order from Murkit:', JSON.stringify(murkitData, null, 2));
 
@@ -132,7 +131,6 @@ export default async function handler(req, res) {
     // 5. РАСЧЕТ ИТОГОВ и ФОРМИРОВАНИЕ ПЕРЕМЕННЫХ
     const currency = "UAH";
     
-    // Строгое приведение к строке с 2 знаками после запятой
     const totalAmount = String(parseFloat(murkitData.sum || 0).toFixed(2));
     const subtotalAmount = totalAmount; 
     
@@ -144,10 +142,9 @@ export default async function handler(req, res) {
     // 6. ФОРМИРОВАНИЕ LINE ITEMS
     const lineItems = murkitItems.map(item => {
         const murkitCode = String(item.code).trim();
-        const wixSku = String(codeToSkuMap[murkitCode] || murkitCode); // Строго строка
+        const wixSku = String(codeToSkuMap[murkitCode] || murkitCode); 
         const wixId = wixSku ? skuToIdMap[wixSku] : null;
         
-        // Цена элемента - строго строка с 2 знаками
         const price = String(parseFloat(item.price || 0).toFixed(2));
 
         const baseItem = {
@@ -157,11 +154,19 @@ export default async function handler(req, res) {
                 amount: price,
                 currency: currency
             },
+            
+            // **** КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Добавление physicalProperties.sku ****
+            physicalProperties: {
+                // Если SKU пуст (что не должно быть, но для безопасности), используем "N/A"
+                sku: wixSku || "N/A", 
+                shippable: true 
+            },
+            // ***************************************************************
+            
             customFields: [
                 { title: "SKU", value: wixSku },
                 { title: "Murkit Code", value: murkitCode }
             ],
-            // Все цены LineItem - строго строки
             totalPriceBeforeTax: { amount: price, currency: currency },
             totalPriceAfterTax: { amount: price, currency: currency },
             lineItemPrice: { amount: price, currency: currency }
@@ -169,6 +174,7 @@ export default async function handler(req, res) {
 
         if (!wixId) {
             console.warn(`Murkit Code ${murkitCode} (Wix SKU: ${wixSku}) not found in Wix, adding as custom item.`);
+            // Для custom item Wix может не требовать catalogReference
             return baseItem; 
         }
 
@@ -189,7 +195,7 @@ export default async function handler(req, res) {
         discount: { amount: "0.00", currency: currency },
         total: { amount: totalAmount, currency: currency },
     };
-
+    
     // 8. ФОРМИРОВАНИЕ ОБЪЕКТА ЗАКАЗА WIX
     
     // Адрес для Billing (Клиент)
@@ -222,7 +228,7 @@ export default async function handler(req, res) {
             firstName: clientName.firstName,
             lastName: clientName.lastName,
             phone: clientPhone,
-            company: ""
+            // company: "" (удалено, чтобы избежать пустой строки)
           }
         },
 
@@ -235,7 +241,7 @@ export default async function handler(req, res) {
                         firstName: recipientName.firstName,
                         lastName: recipientName.lastName,
                         phone: murkitData.recipient?.phone || clientPhone,
-                        company: ""
+                        // company: "" (удалено, чтобы избежать пустой строки)
                     }
                 }
             },
