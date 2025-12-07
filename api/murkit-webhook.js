@@ -147,12 +147,19 @@ export default async function handler(req, res) {
                 variantId = variantMatch.variant.id; 
                 stockData = variantMatch.stock; 
                 
-                // === ИЗМЕНЕНИЕ: Формируем descriptionLines вместо изменения имени ===
+                // === ИЗМЕНЕНИЕ: Формируем descriptionLines (ВАЖНО!) ===
                 if (variantMatch.variant.choices) {
-                    // Превращаем {"Size": "L", "Color": "Black"} в массив descriptionLines
+                    // Wix ожидает структуру: 
+                    // { name: { original: "Color", translated: "Color" }, plainText: { original: "Red", translated: "Red" } }
                     descriptionLines = Object.entries(variantMatch.variant.choices).map(([optName, optValue]) => ({
-                        name: { original: optName },       // Название опции (Size)
-                        plainText: { original: optValue }  // Значение (L)
+                        name: { 
+                            original: optName, 
+                            translated: optName 
+                        },
+                        plainText: { 
+                            original: optValue, 
+                            translated: optValue 
+                        }
                     }));
                 }
             }
@@ -177,7 +184,7 @@ export default async function handler(req, res) {
             quantity: requestedQty,
             catalogReference: catalogRef,
             productName: { original: productName },
-            // Сюда передаем наши опции
+            // Передаем опции в descriptionLines
             descriptionLines: descriptionLines,
             itemType: { preset: "PHYSICAL" },
             physicalProperties: { sku: targetSku, shippable: true },
@@ -247,8 +254,7 @@ export default async function handler(req, res) {
             type: "OTHER_PLATFORM",
             externalOrderId: String(murkitData.number)
         },
-        // ТЕГИ (оставляем в корне)
-        tags: ["Monomarket"], 
+        // УБРАЛ TAGS, ЧТОБЫ УБРАТЬ ОШИБКУ "Expected an object"
         
         status: "APPROVED",
         lineItems: lineItems,
