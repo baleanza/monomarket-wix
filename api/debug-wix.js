@@ -13,7 +13,7 @@ export default async function handler(req, res) {
     const allProductsRaw = await fetchAllProducts(); 
     const durationFetch = Date.now() - startTime;
     
-    // --- НОВАЯ ЛОГИКА: Вывод сырого списка продуктов (если sku не задан) ---
+    // --- ЛОГИКА: Вывод сырого списка продуктов (если sku не задан) ---
     if (!sku) {
       const rawProductsSlice = allProductsRaw.slice(0, LIMIT);
 
@@ -27,7 +27,7 @@ export default async function handler(req, res) {
         note: "This is the raw data array received from Wix V1 API. Look inside the 'variants' array for variant details. The SKU for a variant is typically nested in: variants[i].variant.sku"
       });
     }
-    // --- КОНЕЦ НОВОЙ ЛОГИКИ ---
+    // --- КОНЕЦ ЛОГИКИ СРЕЗА ---
 
 
     // --- СТАРАЯ ЛОГИКА: Детальная проверка для одного SKU (если sku задан) ---
@@ -58,6 +58,10 @@ export default async function handler(req, res) {
     // Ищем результат для конкретного SKU
     const foundItem = results.find(item => String(item.sku).trim() === targetSku);
 
+    // --- ИЗМЕНЕНИЕ: Теперь выводим полный сырой объект, а не упрощенный ---
+    const rawProductOutput = rawProductDebug || "Product containing SKU not found in raw API response";
+    // --- КОНЕЦ ИЗМЕНЕНИЯ ---
+
     res.status(200).json({
       test_sku: sku,
       // Состояние после прохождения через вашу логику
@@ -72,19 +76,8 @@ export default async function handler(req, res) {
       execution_time_ms: duration,
       items_found_total: results.length,
       
-      // КЛЮЧЕВОЙ ДЕБАГ: Сырой объект продукта из Wix
-      raw_wix_product_structure: rawProductDebug ? {
-          id: rawProductDebug.id,
-          sku: rawProductDebug.sku,
-          has_variants: (rawProductDebug.variants && rawProductDebug.variants.length > 0),
-          // Выводим только данные вариантов, чтобы увидеть структуру:
-          variants: rawProductDebug.variants ? rawProductDebug.variants.map(v => ({
-              variantId: v.id,
-              sku: v.variant?.sku, // Проверьте это поле!
-              priceData: v.variant?.priceData,
-              stock: v.variant?.stock
-          })) : null
-      } : "Product containing SKU not found in raw API response",
+      // КЛЮЧЕВОЙ ДЕБАГ: Сырой объект продукта из Wix (ПОЛНЫЙ ДАМП)
+      raw_wix_product_structure: rawProductOutput,
       
       // Обработанные данные для сравнения
       debug_raw_processed: foundItem 
