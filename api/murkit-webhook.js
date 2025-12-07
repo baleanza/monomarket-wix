@@ -155,13 +155,10 @@ export default async function handler(req, res) {
                 currency: currency
             },
             
-            // **** КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Добавление physicalProperties.sku ****
             physicalProperties: {
-                // Если SKU пуст (что не должно быть, но для безопасности), используем "N/A"
                 sku: wixSku || "N/A", 
                 shippable: true 
             },
-            // ***************************************************************
             
             customFields: [
                 { title: "SKU", value: wixSku },
@@ -174,7 +171,6 @@ export default async function handler(req, res) {
 
         if (!wixId) {
             console.warn(`Murkit Code ${murkitCode} (Wix SKU: ${wixSku}) not found in Wix, adding as custom item.`);
-            // Для custom item Wix может не требовать catalogReference
             return baseItem; 
         }
 
@@ -195,7 +191,7 @@ export default async function handler(req, res) {
         discount: { amount: "0.00", currency: currency },
         total: { amount: totalAmount, currency: currency },
     };
-    
+
     // 8. ФОРМИРОВАНИЕ ОБЪЕКТА ЗАКАЗА WIX
     
     // Адрес для Billing (Клиент)
@@ -260,6 +256,11 @@ export default async function handler(req, res) {
             { title: "Відділення НП", value: String(murkitData.delivery?.warehouseNumber || "Не вказано") },
         ]
     };
+
+    // **** ДОБАВЛЕНО ДЛЯ ОТЛАДКИ (печатает JSON перед отправкой) ****
+    console.log('Wix Payload (PRE-SEND):', JSON.stringify(wixOrderPayload, null, 2));
+    // ********************************************************************
+
 
     // 9. Отправляем в Wix
     const createdOrder = await createWixOrder(wixOrderPayload);
