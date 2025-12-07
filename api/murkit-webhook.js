@@ -2,9 +2,11 @@ import { createWixOrder, getProductsBySkus } from '../lib/wixClient.js';
 import { ensureAuth } from '../lib/sheetsClient.js'; 
 
 const WIX_STORES_APP_ID = "215238eb-22a5-4c36-9e7b-e7c08025e04e"; 
+
+// === НАСТРОЙКИ НАЗВАНИЙ ДОСТАВКИ ===
 const SHIPPING_TITLES = {
-    BRANCH: "НП відділення", 
-    COURIER: "НП кур'єр"
+    BRANCH: "Нова Пошта (Відділення)", 
+    COURIER: "Нова Пошта (Кур'єр)"
 };
 
 function checkAuth(req) {
@@ -125,24 +127,34 @@ export default async function handler(req, res) {
         let stockData = productMatch.stock;
         let productName = productMatch.name;
         
+        // Картинка
         let imageObj = null;
-        // Берем главную картинку товара, если она есть
         if (productMatch.media && productMatch.media.mainMedia && productMatch.media.mainMedia.image) {
             imageObj = {
                 url: productMatch.media.mainMedia.image.url,
-                // Wix иногда требует ширину/высоту, но часто хватает url. Попробуем передать как есть.
                 width: productMatch.media.mainMedia.image.width,
                 height: productMatch.media.mainMedia.image.height
             };
         }
 
+        // Массив для опций (цвет, размер)
+        let descriptionLines = [];
+
+        // Поиск Варианта и его Опций
         if (String(productMatch.sku) !== targetSku && productMatch.variants) {
             const variantMatch = productMatch.variants.find(v => String(v.variant?.sku) === targetSku);
             if (variantMatch) {
                 variantId = variantMatch.variant.id; 
                 stockData = variantMatch.stock; 
-                // Если у варианта есть своя картинка, можно попробовать взять её, 
-                // но Wix API Products V1 часто хранит всё в общем media.
+                
+                // === ИЗМЕНЕНИЕ: Формируем descriptionLines вместо изменения имени ===
+                if (variantMatch.variant.choices) {
+                    // Превращаем {"Size": "L", "Color": "Black"} в массив descriptionLines
+                    descriptionLines = Object.entries(variantMatch.variant.choices).map(([optName, optValue]) => ({
+                        name: { original: optName },       // Название опции (Size)
+                        plainText: { original: optValue }  // Значение (L)
+                    }));
+                }
             }
         }
 
@@ -165,6 +177,8 @@ export default async function handler(req, res) {
             quantity: requestedQty,
             catalogReference: catalogRef,
             productName: { original: productName },
+            // Сюда передаем наши опции
+            descriptionLines: descriptionLines,
             itemType: { preset: "PHYSICAL" },
             physicalProperties: { sku: targetSku, shippable: true },
             price: { amount: fmtPrice(item.price) },
@@ -192,7 +206,7 @@ export default async function handler(req, res) {
         total: { amount: fmtPrice(murkitData.sum), currency }
     };
 
-    
+    // === ЛОГИКА ДОСТАВКИ ===
     const deliveryType = String(murkitData.deliveryType || '');
     const npWarehouse = String(murkitData.delivery?.warehouseNumber || '').trim();
     const npCity = String(murkitData.delivery?.settlementName || '').trim();
@@ -200,22 +214,15 @@ export default async function handler(req, res) {
 
     let extendedFields = {};
     let finalAddressLine = "невідома адреса";
-    let deliveryTitle = "Delivery"; // Заголовок, который увидит Wix
+    let deliveryTitle = "Delivery";
 
-    // Проверяем: КУРЬЕР или ОТДЕЛЕНИЕ
     if (deliveryType.includes('courier')) {
-        // === СЦЕНАРИЙ 1: КУРЬЕР ===
-        deliveryTitle = SHIPPING_TITLES.COURIER; // "Нова Пошта (Кур'єр)"
-        finalAddressLine = npStreet ? `${npStreet}` : `Адресна доставка`;
-
+        deliveryTitle = SHIPPING_TITLES.COURIER; 
+        finalAddressLine = npStreet ? `${npStreet}` : `Адресная доставка (нет данных улицы)`;
     } else {
-        // === СЦЕНАРИЙ 2: ОТДЕЛЕНИЕ / ПОЧТОМАТ ===
-        deliveryTitle = SHIPPING_TITLES.BRANCH; // "Нова Пошта (Відділення)"
-        
+        deliveryTitle = SHIPPING_TITLES.BRANCH; 
         if (npWarehouse) {
             finalAddressLine = `Нова Пошта №${npWarehouse}`;
-            
-            // Пишем номер отделения в скрытое поле
             extendedFields = {
                 "namespaces": {
                     "_user_fields": {
@@ -227,7 +234,6 @@ export default async function handler(req, res) {
             finalAddressLine = "Нова Пошта (номер не указан)";
         }
     }
-    
 
     const shippingAddress = {
         country: "UA",
@@ -241,6 +247,9 @@ export default async function handler(req, res) {
             type: "OTHER_PLATFORM",
             externalOrderId: String(murkitData.number)
         },
+        // ТЕГИ (оставляем в корне)
+        tags: ["Monomarket"], 
+        
         status: "APPROVED",
         lineItems: lineItems,
         priceSummary: priceSummary,
@@ -254,7 +263,7 @@ export default async function handler(req, res) {
             }
         },
         shippingInfo: {
-            title: deliveryTitle, // Передаем правильный заголовок метода
+            title: deliveryTitle,
             logistics: {
                 shippingDestination: {
                     address: shippingAddress,
@@ -272,7 +281,6 @@ export default async function handler(req, res) {
         currency: currency,
         weightUnit: "KG",
         taxIncludedInPrices: false,
-
         ...(Object.keys(extendedFields).length > 0 ? { extendedFields } : {})
     };
 
