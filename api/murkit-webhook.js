@@ -1,8 +1,8 @@
 import { createWixOrder, getProductsBySkus } from '../lib/wixClient.js';
-import { ensureAuth } from '../lib/sheetsClient.js'; // Добавлен импорт для работы с Google Sheets
-import { google } from 'googleapis'; // Добавлен импорт google (необходим для ensureAuth)
+import { ensureAuth } from '../lib/sheetsClient.js'; 
+import { google } from 'googleapis';
 
-// Проверка Basic Auth (Логин/Пароль, которые вы зададите в Murkit)
+// Проверка Basic Auth
 function checkAuth(req) {
   const authHeader = req.headers.authorization;
   if (!authHeader) return false;
@@ -37,7 +37,6 @@ function getProductSkuMap(importValues, controlValues) {
     const idxImportField = controlHeaders.indexOf('Import field');
     const idxFeedName = controlHeaders.indexOf('Feed name');
 
-    // 1. Определяем имена колонок в Sheets для Murkit Code (из фида code) и Wix SKU (из фида id)
     let murkitCodeSheetField = '';
     let wixSkuSheetField = '';
 
@@ -48,7 +47,6 @@ function getProductSkuMap(importValues, controlValues) {
         if (feedName === 'id') wixSkuSheetField = String(importField).trim();
     });
     
-    // 2. Находим индексы этих колонок
     const murkitCodeColIndex = headers.indexOf(murkitCodeSheetField);
     const wixSkuColIndex = headers.indexOf(wixSkuSheetField);
     
@@ -57,7 +55,6 @@ function getProductSkuMap(importValues, controlValues) {
         return {};
     }
 
-    // 3. Создаем карту Murkit Code -> Wix SKU
     const map = {};
     rows.forEach(row => {
         const murkitCode = row[murkitCodeColIndex] ? String(row[murkitCodeColIndex]).trim() : '';
@@ -70,9 +67,17 @@ function getProductSkuMap(importValues, controlValues) {
     return map;
 }
 
+// Вспомогательная функция для получения имени получателя
+function getFullName(nameObj) {
+    if (!nameObj) return { firstName: "Client", lastName: "" };
+    return {
+        firstName: nameObj.first || nameObj.firstName || "Client",
+        lastName: nameObj.last || nameObj.lastName || ""
+    };
+}
+
 
 export default async function handler(req, res) {
-  // Murkit шлет POST запрос
   if (req.method !== 'POST') {
     res.status(405).send('Method Not Allowed');
     return;
@@ -100,18 +105,11 @@ export default async function handler(req, res) {
     const { importValues, controlValues } = await readSheetData(sheets, spreadsheetId);
     
     const codeToSkuMap = getProductSkuMap(importValues, controlValues);
-    if (Object.keys(codeToSkuMap).length === 0) {
-        // Мы используем Wix SKU для поиска, поэтому если карта пуста, это ошибка.
-        console.error('Failed to load Murkit Code -> Wix SKU mapping from Google Sheets. Check control list settings.');
-        // Не выбрасываем ошибку, а пытаемся продолжить, используя Murkit Code как SKU
-        // Это может вызвать ошибку позже, но позволяет увидеть, что проблема в Google Sheets.
-    }
-    // ***************************************************************
-
+    
     // 3. Собираем все Wix SKU для запроса к Wix
     const murkitCodes = murkitItems.map(item => String(item.code).trim()).filter(Boolean);
     const wixSkus = murkitCodes
-      .map(code => codeToSkuMap[code] || code) // Используем Murkit Code как запасной SKU, если сопоставление не найдено
+      .map(code => codeToSkuMap[code] || code) // Fallback to code if mapping not found
       .filter(Boolean);
 
     if (wixSkus.length === 0) {
@@ -128,77 +126,140 @@ export default async function handler(req, res) {
       skuToIdMap[p.sku] = p.id;
     });
 
-    // 5. Формируем Line Items для Wix
+    // 5. РАСЧЕТ ИТОГОВ и ФОРМИРОВАНИЕ ПЕРЕМЕННЫХ
+    const currency = "UAH"; // Укр. гривна
+    
+    const totalAmount = parseFloat(murkitData.sum || 0).toFixed(2);
+    // Для Murkit у нас нет разделения, поэтому subtotal = total = sum
+    const subtotalAmount = totalAmount; 
+    
+    const clientName = getFullName(murkitData.client?.name);
+    const recipientName = getFullName(murkitData.recipient?.name);
+    const defaultEmail = "monomarket@mywoodmood.com"; // Дефолтный email
+    const clientPhone = murkitData.client?.phone || murkitData.recipient?.phone || "";
+
+    // 6. ФОРМИРОВАНИЕ LINE ITEMS
     const lineItems = murkitItems.map(item => {
-        // Получаем Wix SKU из Murkit Code
         const murkitCode = String(item.code).trim();
-        // Используем сопоставление, если оно есть, иначе берем Murkit Code как SKU
         const wixSku = codeToSkuMap[murkitCode] || murkitCode; 
-        
-        // Получаем Wix Product ID
         const wixId = wixSku ? skuToIdMap[wixSku] : null;
+        
+        const price = parseFloat(item.price || 0).toFixed(2);
+
+        const baseItem = {
+            name: item.name || `Item ${murkitCode}`, 
+            quantity: parseInt(item.quantity || 1, 10),
+            price: {
+                amount: price,
+                currency: currency
+            },
+            // Добавляем SKU и Murkit Code как customFields
+            customFields: [
+                { title: "SKU", value: wixSku },
+                { title: "Murkit Code", value: murkitCode }
+            ],
+            // Добавляем минимальные данные для Wix PriceSummary, чтобы он не ругался
+            totalPriceBeforeTax: { amount: price, currency: currency },
+            totalPriceAfterTax: { amount: price, currency: currency },
+            lineItemPrice: { amount: price, currency: currency }
+        };
 
         if (!wixId) {
             console.warn(`Murkit Code ${murkitCode} (Wix SKU: ${wixSku}) not found in Wix, adding as custom item.`);
-            return {
-                name: item.name || `Item ${murkitCode}`, 
-                quantity: parseInt(item.quantity || 1, 10),
-                price: {
-                    amount: String(item.price || 0),
-                    currency: "UAH"
-                },
-                customFields: [{ title: "SKU", value: wixSku }] 
-            };
+            return baseItem; 
         }
 
+        // Возвращаем каталожный item
         return {
+            ...baseItem,
             catalogReference: {
                 catalogItemId: wixId,
                 appId: "1380b703-ce81-ff05-f115-39571d94dfcd", // Wix Stores App ID
-            },
-            quantity: parseInt(item.quantity || 1, 10),
-            price: {
-                amount: String(item.price || 0),
-                currency: "UAH"
-            },
-            customFields: [{ title: "SKU", value: wixSku }]
+            }
         };
     });
 
-    // 6. Собираем данные получателя
-    const recipient = murkitData.recipient || {};
-    const delivery = murkitData.delivery || {};
+    // 7. ФОРМИРОВАНИЕ ОБЪЕКТА ЗАКАЗА WIX
     
-    // **** КОРРЕКЦИЯ: Добавляем обертку 'order' ****
+    // Адрес для Billing (используем город и телефон)
+    const billingAddress = {
+        country: "UA",
+        city: murkitData.delivery?.settlementName || "Не вказано",
+        addressLine: "Телефон: " + clientPhone, // Запасной способ хранения телефона
+        email: murkitData.client?.email || defaultEmail,
+    };
+    
+    // Адрес для Shipping (доставка на отделение Новой Почты)
+    const shippingAddress = {
+        country: "UA",
+        city: murkitData.delivery?.settlementName || "Не вказано",
+        addressLine: `НП №${murkitData.delivery?.warehouseNumber || "N/A"} (${murkitData.deliveryType || "N/A"})`,
+    };
+
     const wixOrderPayload = {
       order: {
         channelInfo: {
           type: "API",
-          externalId: String(murkitData.id) // ID заказа в Murkit
+          externalId: String(murkitData.id || murkitData.number) 
         },
         lineItems: lineItems,
+        
+        // 8. TOTALS / PRICE SUMMARY
+        priceSummary: {
+          subtotal: { amount: subtotalAmount, currency: currency },
+          shipping: { amount: "0.00", currency: currency },
+          tax: { amount: "0.00", currency: currency },
+          discount: { amount: "0.00", currency: currency },
+          total: { amount: totalAmount, currency: currency },
+        },
+        
+        // 9. BILLING INFO (Клиент)
         billingInfo: {
-          address: {
-            country: "UA",
-            city: delivery.city || recipient.city || "Kyiv", 
-            addressLine1: delivery.address || recipient.address || "TBD",
-            email: recipient.email || "no-email@example.com",
-            firstName: recipient.firstName || recipient.name || "Client",
-            lastName: recipient.lastName || "",
-            phone: recipient.phone || ""
+          address: billingAddress,
+          contactDetails: {
+            firstName: clientName.firstName,
+            lastName: clientName.lastName,
+            phone: clientPhone,
+            company: ""
           }
         },
-        // Ставим статус оплаты
+
+        // 10. SHIPPING INFO (Получатель и детали доставки)
+        shippingInfo: {
+            title: `Доставка: ${murkitData.deliveryType || 'Не вказано'}`,
+            logistics: {
+                shippingDestination: {
+                    address: shippingAddress,
+                    contactDetails: {
+                        firstName: recipientName.firstName,
+                        lastName: recipientName.lastName,
+                        phone: murkitData.recipient?.phone || clientPhone,
+                        company: ""
+                    }
+                }
+            },
+            cost: {
+                price: { amount: "0.00", currency: currency },
+            }
+        },
+        
         paymentStatus: murkitData.payment_status === 'paid' ? 'PAID' : 'NOT_PAID',
+        currency: currency,
+        // Добавление кастомных полей заказа (например, комментарии, тип доставки)
+        customFields: [
+            { title: "Murkit Order ID", value: String(murkitData.id || murkitData.number) },
+            { title: "Тип доставки", value: murkitData.deliveryType || "Не вказано" },
+            { title: "Місто (НП)", value: murkitData.delivery?.settlementName || "Не вказано" },
+            { title: "Відділення НП", value: murkitData.delivery?.warehouseNumber || "Не вказано" },
+        ]
       }
     };
-    // **********************************************
 
-    // 7. Отправляем в Wix
+    // 11. Отправляем в Wix
     const createdOrder = await createWixOrder(wixOrderPayload);
     console.log('Order created in Wix:', createdOrder.order?.id);
 
-    // 8. Отвечаем Murkit успешным статусом
+    // 12. Отвечаем Murkit успешным статусом
     res.status(200).json({ 
         success: true, 
         wix_order_id: createdOrder.order?.id 
@@ -206,7 +267,6 @@ export default async function handler(req, res) {
 
   } catch (e) {
     console.error('Error processing Murkit webhook:', e);
-    // Возвращаем ошибку 500
     res.status(500).json({ error: e.message });
   }
 }
