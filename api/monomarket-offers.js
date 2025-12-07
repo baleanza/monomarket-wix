@@ -4,6 +4,7 @@ import { getDriveClient } from '../lib/driveClient.js';
 import { buildOffersXml } from '../lib/feedBuilder.js';
 import { getInventoryBySkus } from '../lib/wixClient.js';
 
+// Настройки кеширования на Google Drive
 const CACHE_TTL_SECONDS = parseInt(process.env.CACHE_TTL_SECONDS || '7200', 10);
 const DRIVE_FILE_NAME = 'monomarket-offers.xml';
 const SHARED_DRIVE_FOLDER_ID = process.env.SHARED_DRIVE_FOLDER_ID || null;
@@ -16,7 +17,7 @@ function requireEnv(varName) {
   return value;
 }
 
-
+// ensureAuth теперь объединяет sheets и drive авторизацию
 async function ensureAuth() {
   const keyJson = requireEnv('GOOGLE_SERVICE_ACCOUNT_KEY');
   const spreadsheetId = requireEnv('SPREADSHEET_ID');
@@ -107,17 +108,23 @@ async function writeDriveFileContent(drive, fileId, xml) {
   });
 }
 
+// **** УСИЛЕННАЯ ФУНКЦИЯ ЧТЕНИЯ ДАННЫХ ИЗ SHEETS ****
 async function readSheetData(sheets, spreadsheetId) {
-  const importRes = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Import!A1:ZZ' });
-  const controlRes = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Feed Control List!A1:F' });
-  const deliveryRes = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Delivery!A1:C' });
-
+  // Параллельное чтение трех диапазонов
+  const [importRes, controlRes, deliveryRes] = await Promise.all([
+    sheets.spreadsheets.values.get({ spreadsheetId, range: 'Import!A1:ZZ' }),
+    sheets.spreadsheets.values.get({ spreadsheetId, range: 'Feed Control List!A1:F' }),
+    sheets.spreadsheets.values.get({ spreadsheetId, range: 'Delivery!A1:C' })
+  ]);
+  
+  // Гарантируем, что возвращаем пустой массив, а не null/undefined
   return { 
     importValues: importRes.data.values || [], 
     controlValues: controlRes.data.values || [],
     deliveryValues: deliveryRes.data.values || [] 
   };
 }
+// *************************************************
 
 function isFresh(modifiedTime) {
   if (!modifiedTime) return false;
@@ -126,6 +133,7 @@ function isFresh(modifiedTime) {
   return now - modified < CACHE_TTL_SECONDS * 1000;
 }
 
+// Вспомогательная функция для получения данных о запасах
 async function getInventory(importValues, controlValues) {
     const headers = importValues[0] || [];
     const rows = importValues.slice(1);
@@ -177,13 +185,14 @@ export default async function handler(req, res) {
     return;
   }
 
-
+  // Авторизация удалена, доступ публичный
 
   try {
     const { sheets, drive, spreadsheetId } = await ensureAuth();
 
     const fileMeta = await getOrCreateDriveFile(drive);
 
+    // **** ЛОГИКА КЕШИРОВАНИЯ НА DRIVE ****
     if (fileMeta.id && isFresh(fileMeta.modifiedTime)) {
       try {
         const xml = await readDriveFileContent(drive, fileMeta.id);
@@ -199,16 +208,24 @@ export default async function handler(req, res) {
         console.error('Failed to read cached XML from Drive, will regenerate', e);
       }
     }
-  
+    // *************************************
+    
+    // Если кеш отсутствует или устарел, генерируем новый
     const { importValues, controlValues, deliveryValues } = await readSheetData(
       sheets,
       spreadsheetId
     );
     
+    // Если importValues все еще пуст, значит, таблица пуста или проблема с диапазоном
+    if (importValues.length === 0) {
+        throw new Error("Import sheet is empty or failed to load data.");
+    }
+    
     const { inventoryMap } = await getInventory(importValues, controlValues);
 
     const xml = buildOffersXml(importValues, controlValues, deliveryValues, inventoryMap);
 
+    // Записываем новый XML-файл в Drive
     if (fileMeta.id) {
       try {
         await writeDriveFileContent(drive, fileMeta.id, xml);
@@ -217,6 +234,7 @@ export default async function handler(req, res) {
       }
     }
 
+    // Отправляем сгенерированный файл
     res.setHeader('Content-Type', "application/xml; charset=utf-8");
     res.setHeader(
       'Cache-Control',
@@ -225,6 +243,7 @@ export default async function handler(req, res) {
     res.status(200).send(xml);
   } catch (err) {
     console.error('Error in /api/monomarket-offers', err);
-    res.status(502).send('Bad Gateway');
+    // Изменяем ответ на 502, чтобы увидеть сообщение об ошибке, если sheets.get не сработает
+    res.status(502).send('Bad Gateway: ' + err.message);
   }
 }
