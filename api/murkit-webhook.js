@@ -1,32 +1,27 @@
 import { createWixOrder, getProductsBySkus } from '../lib/wixClient.js';
 import { ensureAuth } from '../lib/sheetsClient.js'; 
 
-// Constants
 const WIX_STORES_APP_ID = "215238eb-22a5-4c36-9e7b-e7c08025e04e"; 
 
-// Basic Auth Check
+// ... (функции checkAuth, readSheetData, getProductSkuMap, getFullName оставляем как были) ...
+
 function checkAuth(req) {
   const authHeader = req.headers.authorization;
   if (!authHeader) return false;
-
   const b64auth = authHeader.split(' ')[1];
   const [login, password] = Buffer.from(b64auth, 'base64').toString().split(':');
-
   return login === process.env.MURKIT_USER && password === process.env.MURKIT_PASS;
 }
 
-// Read Google Sheets for Mapping
 async function readSheetData(sheets, spreadsheetId) {
   const importRes = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Import!A1:ZZ' });
   const controlRes = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Feed Control List!A1:F' });
-
   return { 
     importValues: importRes.data.values || [], 
     controlValues: controlRes.data.values || [] 
   };
 }
 
-// Map: Murkit Code -> Wix SKU
 function getProductSkuMap(importValues, controlValues) {
     const headers = importValues[0] || [];
     const rows = importValues.slice(1);
@@ -57,14 +52,11 @@ function getProductSkuMap(importValues, controlValues) {
         const wSku = row[wixSkuColIndex] ? String(row[wixSkuColIndex]).trim() : '';
         if (mCode && wSku) map[mCode] = wSku;
     });
-    
     return map;
 }
 
-// Helper: Format price to string decimal
 const fmtPrice = (num) => parseFloat(num || 0).toFixed(2);
 
-// Helper: Parse Names
 function getFullName(nameObj) {
     if (!nameObj) return { firstName: "Client", lastName: "" };
     return {
@@ -77,6 +69,9 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).send('Method Not Allowed');
   if (!checkAuth(req)) return res.status(401).json({ error: 'Unauthorized' });
 
+  // Переменная для хранения пейлоуда, чтобы вернуть его при ошибке
+  let debugPayload = null;
+
   try {
     const murkitData = req.body;
     console.log(`Processing Murkit Order #${murkitData.number}`);
@@ -84,12 +79,12 @@ export default async function handler(req, res) {
     const murkitItems = murkitData.items || [];
     if (murkitItems.length === 0) return res.status(400).json({ error: 'No items in order' });
 
-    // 1. Load Mapping from Sheets
+    // 1. Sheets
     const { sheets, spreadsheetId } = await ensureAuth();
     const { importValues, controlValues } = await readSheetData(sheets, spreadsheetId);
     const codeToSkuMap = getProductSkuMap(importValues, controlValues);
     
-    // 2. Resolve Wix SKUs
+    // 2. Resolve SKUs
     const wixSkusToFetch = [];
     const itemsWithSku = murkitItems.map(item => {
         const mCode = String(item.code).trim();
@@ -102,7 +97,7 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: 'No valid SKUs found to fetch from Wix' });
     }
 
-    // 3. Fetch Products from Wix
+    // 3. Fetch Wix Products
     const wixProducts = await getProductsBySkus(wixSkusToFetch);
     
     // 4. Build Line Items
@@ -112,7 +107,6 @@ export default async function handler(req, res) {
         const requestedQty = parseInt(item.quantity || 1, 10);
         const targetSku = item.wixSku;
 
-        // Find Product
         const productMatch = wixProducts.find(p => {
             if (String(p.sku) === targetSku) return true;
             if (p.variants) return p.variants.some(v => String(v.variant?.sku) === targetSku);
@@ -128,7 +122,7 @@ export default async function handler(req, res) {
         let stockData = productMatch.stock;
         let productName = productMatch.name;
 
-        // Check if Variant
+        // Variant check
         if (String(productMatch.sku) !== targetSku && productMatch.variants) {
             const variantMatch = productMatch.variants.find(v => String(v.variant?.sku) === targetSku);
             if (variantMatch) {
@@ -137,7 +131,6 @@ export default async function handler(req, res) {
             }
         }
 
-        // Stock Check
         if (stockData.trackQuantity && (stockData.quantity < requestedQty)) {
              throw new Error(`Insufficient stock for SKU '${targetSku}'. Requested: ${requestedQty}, Available: ${stockData.quantity}`);
         }
@@ -145,12 +138,10 @@ export default async function handler(req, res) {
              throw new Error(`SKU '${targetSku}' is marked as Out of Stock in Wix.`);
         }
 
-        // Construct Catalog Reference
         const catalogRef = {
             catalogItemId: catalogItemId,
             appId: WIX_STORES_APP_ID
         };
-        // ONLY add options if we have a variantId
         if (variantId) {
             catalogRef.options = { variantId: variantId };
         }
@@ -174,7 +165,7 @@ export default async function handler(req, res) {
         });
     }
 
-    // 5. Prepare Order Info
+    // 5. Prepare Order
     const currency = "UAH";
     const clientName = getFullName(murkitData.client?.name);
     const recipientName = getFullName(murkitData.recipient?.name);
@@ -185,7 +176,7 @@ export default async function handler(req, res) {
     const shippingAddress = {
         country: "UA",
         city: String(murkitData.delivery?.settlementName || "City"),
-        addressLine: `Nova Poshta: ${murkitData.delivery?.warehouseNumber || '1'}`, 
+        addressLine: `Nova Poshta: ${murkitData.delivery?.warehouseNumber || '1'}`,
         postalCode: "00000"
     };
 
@@ -199,7 +190,7 @@ export default async function handler(req, res) {
 
     const wixOrderPayload = {
         channelInfo: {
-            type: "OTHER_PLATFORM", // CHANGED from 'API' to a valid enum-like value
+            type: "WEB", // Исправлено на валидный тип
             externalId: String(murkitData.number)
         },
         lineItems: lineItems,
@@ -235,10 +226,12 @@ export default async function handler(req, res) {
         buyerInfo: { email: email },
         paymentStatus: (murkitData.payment_status === 'paid' || String(murkitData.paymentType || '').includes('paid')) ? "PAID" : "NOT_PAID",
         currency: currency,
-        weightUnit: "KG" // Added explicitly
+        weightUnit: "KG"
     };
 
-    // 6. Create Order
+    debugPayload = wixOrderPayload; // Сохраняем для отладки
+
+    // 6. Send
     const createdOrder = await createWixOrder(wixOrderPayload);
     
     res.status(200).json({ 
@@ -249,6 +242,11 @@ export default async function handler(req, res) {
 
   } catch (e) {
     console.error('Murkit Webhook Error:', e.message);
-    res.status(500).json({ error: e.message });
+    
+    // ВОЗВРАЩАЕМ ПОЛНЫЙ JSON ЗАПРОСА В ОТВЕТЕ, ЧТОБЫ ВЫ ЕГО УВИДЕЛИ В POSTMAN
+    res.status(500).json({ 
+        error: e.message,
+        debug_payload_sent_to_wix: debugPayload 
+    });
   }
 }
