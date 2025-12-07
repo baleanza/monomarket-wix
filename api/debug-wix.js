@@ -1,20 +1,49 @@
+// api/debug-wix.js
 import { getInventoryBySkus, fetchAllProducts } from '../lib/wixClient.js';
 
 export default async function handler(req, res) {
-  const { sku } = req.query;
-
-  if (!sku) {
-    return res.status(400).json({ error: 'Please provide ?sku=...' });
-  }
-
-  const targetSku = String(sku).trim(); 
-  let rawProductDebug = null; 
+  // Добавлена возможность передать параметр limit для просмотра большего кол-ва товаров
+  const { sku, limit: limitQuery } = req.query; 
+  const LIMIT = parseInt(limitQuery) || 10; // По умолчанию показываем 10 товаров
 
   try {
     const startTime = Date.now();
     
     // (1) Получаем сырые данные всех продуктов напрямую из Wix
     const allProductsRaw = await fetchAllProducts(); 
+    const durationFetch = Date.now() - startTime;
+    
+    // --- НОВАЯ ЛОГИКА: Вывод списка всех продуктов (если sku не задан) ---
+    if (!sku) {
+      const productSummary = allProductsRaw.slice(0, LIMIT).map(p => {
+        return {
+          id: p.id,
+          sku: p.sku || 'No Base SKU',
+          name: p.name || 'No Name',
+          has_variants: (p.variants && p.variants.length > 0),
+          // Извлекаем только ключевые поля вариантов
+          variants: p.variants ? p.variants.map(v => ({
+              variantId: v.id,
+              // КЛЮЧЕВОЕ ПОЛЕ: variant?.sku
+              sku: v.variant?.sku || 'No Variant SKU', 
+          })) : []
+        };
+      });
+
+      return res.status(200).json({
+        message: `Showing first ${productSummary.length} of ${allProductsRaw.length} products.`,
+        total_products_fetched: allProductsRaw.length,
+        fetch_duration_ms: durationFetch,
+        product_list_summary: productSummary,
+        note: "Raw SKU for variants is nested: variants[i].variant.sku. Please verify the 'sku' field in the 'variants' list below."
+      });
+    }
+    // --- КОНЕЦ НОВОЙ ЛОГИКИ ---
+
+
+    // --- СТАРАЯ ЛОГИКА: Детальная проверка для одного SKU (если sku задан) ---
+    const targetSku = String(sku).trim(); 
+    let rawProductDebug = null; 
 
     // (2) Ищем сырой продукт, который содержит искомый SKU
     const foundProduct = allProductsRaw.find(p => {
