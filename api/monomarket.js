@@ -2,7 +2,7 @@
 import { ensureAuth, cleanPrice } from '../lib/sheetsClient.js'; 
 import { getInventoryBySkus } from '../lib/wixClient.js';
 
-// Чтение данных из Google Sheets
+// Читання даних з Google Sheets
 async function readSheetData(sheets, spreadsheetId) {
     const importRes = await sheets.spreadsheets.values.get({
         spreadsheetId,
@@ -34,7 +34,7 @@ export default async function handler(req, res) {
     const headers = importValues[0];
     const dataRows = importValues.slice(1);
     
-    // Парсим настройки фида
+    // Парсимо налаштування фіду
     const controlHeaders = controlValues[0] || [];
     const idxImportField = controlHeaders.indexOf('Import field');
     const idxFeedName = controlHeaders.indexOf('Feed name');
@@ -48,9 +48,9 @@ export default async function handler(req, res) {
       }
     });
 
-    // --- ОПРЕДЕЛЕНИЕ ИНДЕКСОВ КОЛОНОК ---
+    // --- ВИЗНАЧЕННЯ ІНДЕКСІВ КОЛОНОК ---
     
-    // 1. Ищем колонку Name/Title
+    // 1. Шукаємо колонку Name/Title
     let colName = -1;
     const nameKeys = [fieldMap['name'], fieldMap['title'], 'Name', 'Title'].filter(Boolean);
     for (const key of nameKeys) {
@@ -58,18 +58,18 @@ export default async function handler(req, res) {
       if (colName > -1) break;
     }
 
-    // 2. Ищем колонку SKU
+    // 2. Шукаємо колонку SKU
     const colSku = headers.indexOf(fieldMap['sku'] || 'SKU'); 
     
-    // 3. Ищем колонку Price
+    // 3. Шукаємо колонку Price
     const colPrice = headers.indexOf(fieldMap['price'] || 'Price');
 
-    // 4. Ищем колонку Code (Product ID)
+    // 4. Шукаємо колонку Code (Product ID)
     let colCode = -1;
     if (fieldMap['code']) {
         colCode = headers.indexOf(fieldMap['code']);
     }
-    // Если в маппинге нет, ищем просто по названию "code"
+    // Якщо в мапінгу немає, шукаємо просто за назвою "code"
     if (colCode === -1) {
         colCode = headers.indexOf('code');
     }
@@ -97,7 +97,7 @@ export default async function handler(req, res) {
       });
     });
 
-    // Запрашиваем остатки из Wix
+    // Запитуємо залишки з Wix
     const inventory = await getInventoryBySkus(skus);
     
     const stockMap = {};
@@ -105,7 +105,7 @@ export default async function handler(req, res) {
       stockMap[String(item.sku).trim()] = item;
     });
 
-    // HTML СТРАНИЦЫ
+    // HTML СТОРІНКИ
     let html = `
     <html>
       <head>
@@ -114,7 +114,7 @@ export default async function handler(req, res) {
         <style>
           body { font-family: sans-serif; padding: 20px; max-width: 1200px; margin: 0 auto; }
           
-          /* Стили для блока поиска заказа */
+          /* Стилі для блоку пошуку замовлення */
           .order-lookup-box {
             background-color: #f0f7ff;
             border: 1px solid #cce5ff;
@@ -146,7 +146,7 @@ export default async function handler(req, res) {
           .res-success { color: #0070f3; }
           .res-error { color: #d93025; }
 
-          /* Стили таблицы */
+          /* Стилі таблиці */
           table { border-collapse: collapse; width: 100%; margin-top: 15px; }
           th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
           th { background-color: #f2f2f2; }
@@ -183,22 +183,33 @@ export default async function handler(req, res) {
                 resultSpan.className = "lookup-result";
 
                 try {
-                    // Используем существующий debug-api для получения JSON заказа
                     const res = await fetch('/api/debug-order?id=' + encodeURIComponent(id));
+                    
+                    // 1. Перевіряємо статус відповіді, щоб уникнути помилок парсингу HTML
+                    if (!res.ok) {
+                        const errorText = await res.text();
+                        // Виводимо статус та частину тіла відповіді
+                        resultSpan.textContent = `Помилка сервера (${res.status}): ${errorText.substring(0, 50)}...`;
+                        resultSpan.className = "lookup-result res-error";
+                        return;
+                    }
+                    
                     const data = await res.json();
-
-                    if (data.number) {
-                        resultSpan.textContent = "Номер замовлення: " + data.number;
+                    
+                    // 2. Коректний пошук номера в структурі {"order": {"number": "..."}}
+                    if (data.order && data.order.number) {
+                        resultSpan.textContent = "Номер замовлення: " + data.order.number;
                         resultSpan.className = "lookup-result res-success";
                     } else if (data.error) {
                         resultSpan.textContent = "Помилка: " + data.error;
                         resultSpan.className = "lookup-result res-error";
                     } else {
-                        resultSpan.textContent = "Не знайдено або інша структура відповіді";
+                        resultSpan.textContent = "Не знайдено або недійсний ID";
                         resultSpan.className = "lookup-result res-error";
                     }
                 } catch (e) {
-                    resultSpan.textContent = "Помилка запиту: " + e.message;
+                    // Обробка мережевих помилок або помилок парсингу JSON
+                    resultSpan.textContent = "Помилка запиту (JS): " + e.message;
                     resultSpan.className = "lookup-result res-error";
                 }
             }
@@ -216,7 +227,7 @@ export default async function handler(req, res) {
             <tr>
               <th>Product ID</th>
               <th>Артикул (SKU)</th>
-              <th>Назва</th>
+              <th>Назва (Sheet)</th>
               <th>Ціна (Sheet)</th>
               <th>Наявність (Wix)</th>
               <th>К-сть (Wix)</th>
