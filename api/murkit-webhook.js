@@ -9,11 +9,18 @@ const SHIPPING_TITLES = {
     COURIER: "Нова Пошта (Кур'єр)"
 };
 
-// Вспомогательная функция для создания ошибок с кодом
-function createError(status, message) {
+// Хелпер для создания кастомных ошибок
+function createError(status, message, code = null) {
     const err = new Error(message);
     err.status = status;
+    if (code) err.code = code;
     return err;
+}
+
+// Нормализация SKU: строка, без пробелов
+function normalizeSku(sku) {
+    if (!sku) return '';
+    return String(sku).trim();
 }
 
 function checkAuth(req) {
@@ -83,26 +90,20 @@ export default async function handler(req, res) {
   try {
     const murkitData = req.body;
     
-    // Валидация входных данных (400)
-    if (!murkitData.number) {
-        throw createError(400, 'Missing order number');
-    }
-
+    if (!murkitData.number) throw createError(400, 'Missing order number');
     const murkitOrderId = String(murkitData.number);
     console.log(`Processing Murkit Order #${murkitOrderId}`);
 
-    // === ШАГ 0: ДЕДУПЛИКАЦИЯ (200 OK) ===
+    // === ШАГ 0: ДЕДУПЛИКАЦИЯ ===
     const existingOrder = await findWixOrderByExternalId(murkitOrderId);
     if (existingOrder) {
         console.log(`Order #${murkitOrderId} already exists. ID: ${existingOrder.id}`);
         return res.status(200).json({ "id": existingOrder.id });
     }
 
-    // === ВАЛИДАЦИЯ ТОВАРОВ (400) ===
+    // === ВАЛИДАЦИЯ ===
     const murkitItems = murkitData.items || [];
-    if (murkitItems.length === 0) {
-        throw createError(400, 'No items in order');
-    }
+    if (murkitItems.length === 0) throw createError(400, 'No items in order');
 
     const currency = "UAH";
 
@@ -132,69 +133,89 @@ export default async function handler(req, res) {
     
     for (const item of itemsWithSku) {
         const requestedQty = parseInt(item.quantity || 1, 10);
-        const targetSku = item.wixSku; 
+        const targetSku = normalizeSku(item.wixSku); // Целевой SKU
 
-        // Ищем товар
-        const productMatch = wixProducts.find(p => {
-            if (String(p.sku) === targetSku) return true;
-            if (p.variants) return p.variants.some(v => String(v.variant?.sku) === targetSku);
-            return false;
-        });
+        // === ГЛУБОКИЙ ПОИСК (ПРИОРИТЕТ ВАРИАНТОВ) ===
+        // Мы не используем простой .find() по продуктам, мы ищем точное вхождение SKU
+        
+        let foundProduct = null;
+        let foundVariant = null;
+        let isVariantMatch = false;
 
-        // БИЗНЕС ОШИБКА: Товар не найден (409 Conflict)
-        if (!productMatch) {
-            throw createError(409, `Product with SKU '${targetSku}' (Murkit Code: ${item.code}) not found in Wix.`);
+        // 1. Сначала ищем среди ВАРИАНТОВ всех продуктов
+        for (const p of wixProducts) {
+            if (p.variants && p.variants.length > 0) {
+                const vMatch = p.variants.find(v => normalizeSku(v.variant?.sku) === targetSku);
+                if (vMatch) {
+                    foundProduct = p;
+                    foundVariant = vMatch;
+                    isVariantMatch = true;
+                    break; // Нашли вариант, выходим
+                }
+            }
         }
 
-        let catalogItemId = productMatch.id; 
+        // 2. Если в вариантах не нашли, ищем среди РОДИТЕЛЬСКИХ SKU
+        if (!foundProduct) {
+            foundProduct = wixProducts.find(p => normalizeSku(p.sku) === targetSku);
+        }
+
+        // === ОБРАБОТКА ОШИБКИ 409 (ТОВАР НЕ НАЙДЕН) ===
+        if (!foundProduct) {
+            // Формируем ошибку строго по запросу
+            throw createError(409, `Product with code ${item.code} not found`, "ITEM_NOT_FOUND");
+        }
+
+        // Данные для заполнения
+        let catalogItemId = foundProduct.id; 
         let variantId = null;
-        let stockData = productMatch.stock;
-        let productName = productMatch.name;
+        let stockData = foundProduct.stock; // Дефолт (родитель)
+        let productName = foundProduct.name;
         
         let variantChoices = null; 
         let descriptionLines = []; 
         
-        // Поиск Варианта
-        let matchingVariant = null;
-        if (productMatch.variants && productMatch.variants.length > 0) {
-            matchingVariant = productMatch.variants.find(v => String(v.variant?.sku) === targetSku);
-        }
-
-        if (matchingVariant) {
-            variantId = matchingVariant.variant.id; 
-            stockData = matchingVariant.stock; 
+        // Если нашли конкретный ВАРИАНТ
+        if (isVariantMatch && foundVariant) {
+            console.log(`[INFO] SKU ${targetSku} identified as VARIANT: ${foundVariant.variant.id}`);
             
-            if (matchingVariant.variant.choices) {
-                variantChoices = matchingVariant.variant.choices;
+            variantId = foundVariant.variant.id; 
+            stockData = foundVariant.stock; 
+            
+            // Вытаскиваем опции (Choices)
+            if (foundVariant.variant.choices) {
+                variantChoices = foundVariant.variant.choices; // {"Color": "Red"}
+                
+                // Формируем descriptionLines (для UI заказа)
                 descriptionLines = Object.entries(variantChoices).map(([k, v]) => ({
                     name: { original: k, translated: k },
                     plainText: { original: v, translated: v },
                     lineType: "PLAIN_TEXT"
                 }));
             }
+        } else {
+            console.log(`[INFO] SKU ${targetSku} identified as PRODUCT (No variant specific match)`);
         }
 
-        // БИЗНЕС ОШИБКА: Нет на остатках (409 Conflict)
+        // === ПРОВЕРКИ СТОКА (ТОЖЕ 409, НО ДРУГОЕ СООБЩЕНИЕ) ===
         if (stockData.inStock === false) {
-             throw createError(409, `SKU '${targetSku}' is marked as Out of Stock in Wix.`);
+             throw createError(409, `SKU '${targetSku}' is out of stock`);
         }
-
-        // БИЗНЕС ОШИБКА: Не хватает количества (409 Conflict)
         if (stockData.trackQuantity && (stockData.quantity < requestedQty)) {
-             throw createError(409, `Insufficient stock for SKU '${targetSku}'. Requested: ${requestedQty}, Available: ${stockData.quantity}`);
+             throw createError(409, `Insufficient stock for SKU '${targetSku}'. Available: ${stockData.quantity}`);
         }
 
         // Картинка
         let imageObj = null;
-        if (productMatch.media && productMatch.media.mainMedia && productMatch.media.mainMedia.image) {
+        if (foundProduct.media && foundProduct.media.mainMedia && foundProduct.media.mainMedia.image) {
             imageObj = {
-                url: productMatch.media.mainMedia.image.url,
-                width: productMatch.media.mainMedia.image.width,
-                height: productMatch.media.mainMedia.image.height
+                url: foundProduct.media.mainMedia.image.url,
+                width: foundProduct.media.mainMedia.image.width,
+                height: foundProduct.media.mainMedia.image.height
             };
         }
 
-        // Формируем Catalog Reference
+        // Формируем ссылку на каталог
         const catalogRef = {
             catalogItemId: catalogItemId,
             appId: WIX_STORES_APP_ID
@@ -202,6 +223,7 @@ export default async function handler(req, res) {
 
         if (variantId) {
             catalogRef.options = { variantId: variantId };
+            // Критично: добавляем карту опций, чтобы Wix "понял", что это за вариант
             if (variantChoices) {
                 catalogRef.options.options = variantChoices;
             }
@@ -211,7 +233,7 @@ export default async function handler(req, res) {
             quantity: requestedQty,
             catalogReference: catalogRef,
             productName: { original: productName },
-            descriptionLines: descriptionLines,
+            descriptionLines: descriptionLines, // Передаем опции для отображения
             itemType: { preset: "PHYSICAL" },
             physicalProperties: { sku: targetSku, shippable: true },
             price: { amount: fmtPrice(item.price) },
@@ -332,7 +354,6 @@ export default async function handler(req, res) {
 
     const createdOrder = await createWixOrder(wixOrderPayload);
     
-    // === 201 Created ===
     res.status(201).json({ 
         "id": createdOrder.order?.id
     });
@@ -340,9 +361,17 @@ export default async function handler(req, res) {
   } catch (e) {
     console.error('Murkit Webhook Error:', e.message);
     
-    // Если у ошибки есть статус (400 или 409), используем его. Иначе 500.
     const status = e.status || 500;
     
+    // Кастомный формат ответа для ITEM_NOT_FOUND (409)
+    if (status === 409 && e.code === 'ITEM_NOT_FOUND') {
+        return res.status(409).json({
+            message: e.message,
+            code: e.code
+        });
+    }
+
+    // Обычный формат ошибки
     res.status(status).json({ 
         error: e.message 
     });
