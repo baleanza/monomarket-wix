@@ -2,38 +2,43 @@
 import { ensureAuth, cleanPrice } from '../lib/sheetsClient.js'; 
 import { getInventoryBySkus } from '../lib/wixClient.js';
 
-// --- NEW HELPER FUNCTION FOR CLOUDINARY TRANSFORMATION ---
+// --- HELPER FUNCTION FOR CLOUDINARY TRANSFORMATION ---
 function modifyImageUrl(originalUrl) {
     if (typeof originalUrl !== 'string') originalUrl = '';
     originalUrl = originalUrl.trim();
     
-    // Якщо сирий URL пустий, невірний або є результатом функції IMAGE()
+    // Filter out empty, Google Sheets internal image strings, or explicit 'no photo' text
     if (!originalUrl || originalUrl === 'CellImage' || originalUrl.toLowerCase().includes('no photo')) {
         return '';
     }
     
-    // Transformation to inject (на основі формули користувача)
+    // Transformation to inject (based on user's desired format)
     const transformation = 't_JPG_w240h160_cropped30/';
-    const uploadBase = 'upload/';
+    const uploadBase = '/upload/';
     
-    // Виконуємо трансформацію тільки для URL-адрес Cloudinary
+    // Apply transformation only to Cloudinary URLs
     if (originalUrl.includes('res.cloudinary.com/') && originalUrl.includes(uploadBase)) {
-        // Знаходимо індекс одразу після сегменту 'upload/'
+        // Find the index right after the 'upload/' segment
         const index = originalUrl.indexOf(uploadBase) + uploadBase.length;
         
-        // Вставляємо рядок трансформації
-        return originalUrl.slice(0, index) + transformation + originalUrl.slice(index);
+        // Insert the transformation string
+        let modifiedUrl = originalUrl.slice(0, index) + transformation + originalUrl.slice(index);
+
+        // Prevent double insertion if the URL already contained a transformation string
+        if (modifiedUrl.includes(transformation + transformation)) {
+             modifiedUrl = modifiedUrl.replace(transformation + transformation, transformation);
+        }
+
+        return modifiedUrl;
     }
     
-    // Якщо це інша URL-адреса, повертаємо її без змін
+    // For non-Cloudinary URLs, return the original URL
     return originalUrl; 
 }
 // --- END HELPER FUNCTION ---
 
 
 // Read data from Google Sheets
-// ... (readSheetData без змін)
-
 async function readSheetData(sheets, spreadsheetId) {
     const importRes = await sheets.spreadsheets.values.get({
         spreadsheetId,
@@ -53,7 +58,7 @@ export default async function handler(req, res) {
   const AUTH_USER = process.env.MONOMARKET_USER;
   const AUTH_PASS = process.env.MONOMARKET_PASSWORD;
   
-  // Якщо облікові дані для захисту встановлені, активуємо перевірку (Basic Auth)
+  // BASIC AUTH CHECK
   if (AUTH_USER && AUTH_PASS) {
       const authHeader = req.headers.authorization;
       
@@ -89,11 +94,13 @@ export default async function handler(req, res) {
     
     // Parse feed settings
     const controlHeaders = controlValues[0] || [];
+    const controlRows = controlValues.slice(1);
+
     const idxImportField = controlHeaders.indexOf('Import field');
     const idxFeedName = controlHeaders.indexOf('Feed name');
 
     const fieldMap = {}; 
-    controlValues.slice(1).forEach(row => {
+    controlRows.forEach(row => {
       const imp = row[idxImportField];
       const feedName = row[idxFeedName];
       if (imp && feedName) {
@@ -126,19 +133,33 @@ export default async function handler(req, res) {
         colCode = headers.indexOf('code');
     }
     
-    // 5. Find Image columns (image_1 to image_7)
+    // 5. Find Image columns dynamically (all fields mapped to image_link, image_1, etc.)
     const imageCols = [];
     const maxImages = 7;
-    for (let i = 1; i <= maxImages; i++) {
-        const feedName = `image_${i}`;
-        const sheetHeader = fieldMap[feedName]; // Get sheet header from control list
-        let colIndex = -1;
+    
+    controlRows.forEach((row) => {
+        const headerName = row[idxImportField] ? String(row[idxImportField]).trim() : '';
+        const feedName = row[idxFeedName] ? String(row[idxFeedName]).trim() : '';
         
-        if (sheetHeader) {
-            colIndex = headers.indexOf(sheetHeader);
+        // If Feed name starts with 'image_' (e.g., image_link, image_1, image_7)
+        if (feedName && feedName.startsWith('image_')) {
+            const colIndex = headers.indexOf(headerName);
+            // Ensure we found the header in the Import sheet
+            if (colIndex > -1) {
+                imageCols.push({ 
+                    index: colIndex, 
+                    feedName: feedName,
+                    sheetHeader: headerName 
+                });
+            }
         }
-        // Save the index, even if -1, to maintain order
-        imageCols.push({ index: colIndex, feedName: feedName });
+    });
+
+    const finalImageCols = imageCols.slice(0, maxImages);
+    
+    // Fill remaining slots with empty placeholders
+    while (finalImageCols.length < maxImages) {
+        finalImageCols.push({ index: -1, feedName: 'empty', sheetHeader: 'N/A' });
     }
     
     // --- END COLUMN INDEX DEFINITION ---
@@ -159,17 +180,17 @@ export default async function handler(req, res) {
       const codeVal = colCode > -1 ? (row[colCode] || '') : ''; 
       
       const images = [];
-      const rawImages = []; // Зберігаємо сирі значення для дебагу
-      imageCols.forEach(imgCol => {
+      const rawImages = []; 
+      
+      finalImageCols.forEach(imgCol => {
           if (imgCol.index > -1) {
               const rawUrl = row[imgCol.index] ? String(row[imgCol.index]).trim() : '';
               rawImages.push(rawUrl);
               
-              // APPLY MODIFICATION HERE
               const modifiedUrl = modifyImageUrl(rawUrl);
               images.push(modifiedUrl);
           } else {
-              images.push(''); // Placeholder for missing mapping
+              images.push(''); 
               rawImages.push('');
           }
       });
@@ -181,7 +202,7 @@ export default async function handler(req, res) {
         priceRaw: priceVal,
         price: cleanPrice(priceVal),
         images: images,
-        rawImages: rawImages // Передаємо сирі значення
+        rawImages: rawImages
       });
     });
 
@@ -200,7 +221,6 @@ export default async function handler(req, res) {
         <title>Monomarket Control</title>
         <meta charset="UTF-8">
         <style>
-          /* ... (стилі без змін, крім img-placeholder) ... */
           body { font-family: sans-serif; padding: 20px; max-width: 1200px; margin: 0 auto; }
           
           /* Styles for order lookup block */
@@ -251,7 +271,7 @@ export default async function handler(req, res) {
               vertical-align: middle;
               line-height: 0; 
               border-left: 1px dashed #eee; 
-              position: relative; /* For image hover effect */
+              position: relative; 
           }
           .img-cell img {
               max-width: 40px;
@@ -263,7 +283,7 @@ export default async function handler(req, res) {
               cursor: pointer;
           }
           .img-cell img:hover {
-              transform: scale(3.5); /* Zoom effect on hover */
+              transform: scale(3.5); 
               z-index: 10;
               position: absolute;
               border: 1px solid #ccc;
@@ -276,9 +296,9 @@ export default async function handler(req, res) {
               height: 100%;
               background-color: #f9f9f9; 
               font-size: 8px;
-              line-height: 10px; /* Зменшуємо лінійний простір, щоб вмістити текст */
+              line-height: 10px; 
               padding: 5px 2px;
-              overflow: hidden; /* Обрізати довгий URL */
+              overflow: hidden; 
               color: #888;
           }
           /* END NEW IMAGE STYLES */
@@ -302,7 +322,6 @@ export default async function handler(req, res) {
 
         <script>
             async function lookupOrder() {
-                // ... (JS функція без змін)
                 const input = document.getElementById('wixOrderId');
                 const resultSpan = document.getElementById('lookupResult');
                 const id = input.value.trim();
@@ -317,7 +336,7 @@ export default async function handler(req, res) {
                 resultSpan.className = "lookup-result";
 
                 try {
-                    // Використовуємо шлях /debug-order, згідно з vercel.json
+                    // Используем путь /debug-order, согласно vercel.json
                     const res = await fetch('/debug-order?id=' + encodeURIComponent(id));
                     
                     // 1. Check response status to avoid HTML parsing errors
@@ -403,13 +422,29 @@ export default async function handler(req, res) {
           <td>${item.code}</td>
           
           ${item.images.map((url, index) => {
-              const rawContent = item.rawImages[index] || '-'; // Сирий вміст для дебагу
+              const rawContent = item.rawImages[index] || ''; 
+              const mappedHeader = finalImageCols[index].sheetHeader;
+              let debugText;
               
+              if (url) {
+                  // If we have a valid URL, no debug text needed
+                  debugText = ''; 
+              } else if (rawContent === '') {
+                  // Content is empty
+                  debugText = `ПУСТО: ${mappedHeader}`;
+              } else if (rawContent.length > 20) {
+                  // Content is long, but not an image URL (e.g., formula result)
+                  debugText = `КОНТЕНТ (${rawContent.substring(0, 10)}...)`;
+              } else {
+                  // Short content (e.g., 'CellImage' or error text)
+                  debugText = rawContent;
+              }
+
               return `
-                <td class="img-cell" title="Фото ${index + 1}">
+                <td class="img-cell" title="Фото ${index + 1} | Header: ${mappedHeader} | Raw: ${rawContent}">
                   ${url 
                     ? `<img src="${url}" alt="Фото ${index + 1}" loading="lazy">` 
-                    : `<span class="img-placeholder">${rawContent.length > 10 ? 'CONTENT...' : rawContent}</span>`
+                    : `<span class="img-placeholder">${debugText}</span>`
                   }
                 </td>
               `;
