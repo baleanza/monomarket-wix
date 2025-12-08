@@ -4,36 +4,36 @@ import { getInventoryBySkus } from '../lib/wixClient.js';
 
 // --- NEW HELPER FUNCTION FOR CLOUDINARY TRANSFORMATION ---
 function modifyImageUrl(originalUrl) {
+    if (typeof originalUrl !== 'string') originalUrl = '';
+    originalUrl = originalUrl.trim();
+    
+    // Якщо сирий URL пустий, невірний або є результатом функції IMAGE()
     if (!originalUrl || originalUrl === 'CellImage' || originalUrl.toLowerCase().includes('no photo')) {
         return '';
     }
     
-    // Transformation to inject (based on user's formula logic)
+    // Transformation to inject (на основі формули користувача)
     const transformation = 't_JPG_w240h160_cropped30/';
     const uploadBase = 'upload/';
     
-    if (originalUrl.includes(uploadBase)) {
-        // Find the index right after the 'upload/' segment
+    // Виконуємо трансформацію тільки для URL-адрес Cloudinary
+    if (originalUrl.includes('res.cloudinary.com/') && originalUrl.includes(uploadBase)) {
+        // Знаходимо індекс одразу після сегменту 'upload/'
         const index = originalUrl.indexOf(uploadBase) + uploadBase.length;
         
-        // Insert the transformation string, but first ensure no other transformation exists right after 'upload/'
-        let modifiedUrl = originalUrl.slice(0, index);
-        const remainingPath = originalUrl.slice(index);
-        
-        // If the remaining path already contains 'v' (version segment), it should go after it, 
-        // but since the original formula just did a SUBSTITUTE on the base, we stick to replacing the upload path.
-        // Assuming clean URL format: .../upload/[version]/[path]
-        
-        // Simple insertion after 'upload/'
+        // Вставляємо рядок трансформації
         return originalUrl.slice(0, index) + transformation + originalUrl.slice(index);
     }
     
+    // Якщо це інша URL-адреса, повертаємо її без змін
     return originalUrl; 
 }
 // --- END HELPER FUNCTION ---
 
 
 // Read data from Google Sheets
+// ... (readSheetData без змін)
+
 async function readSheetData(sheets, spreadsheetId) {
     const importRes = await sheets.spreadsheets.values.get({
         spreadsheetId,
@@ -159,14 +159,18 @@ export default async function handler(req, res) {
       const codeVal = colCode > -1 ? (row[colCode] || '') : ''; 
       
       const images = [];
+      const rawImages = []; // Зберігаємо сирі значення для дебагу
       imageCols.forEach(imgCol => {
           if (imgCol.index > -1) {
               const rawUrl = row[imgCol.index] ? String(row[imgCol.index]).trim() : '';
+              rawImages.push(rawUrl);
+              
               // APPLY MODIFICATION HERE
               const modifiedUrl = modifyImageUrl(rawUrl);
               images.push(modifiedUrl);
           } else {
               images.push(''); // Placeholder for missing mapping
+              rawImages.push('');
           }
       });
       
@@ -176,7 +180,8 @@ export default async function handler(req, res) {
         name: colName > -1 ? row[colName] : '(Без назви)',
         priceRaw: priceVal,
         price: cleanPrice(priceVal),
-        images: images 
+        images: images,
+        rawImages: rawImages // Передаємо сирі значення
       });
     });
 
@@ -195,6 +200,7 @@ export default async function handler(req, res) {
         <title>Monomarket Control</title>
         <meta charset="UTF-8">
         <style>
+          /* ... (стилі без змін, крім img-placeholder) ... */
           body { font-family: sans-serif; padding: 20px; max-width: 1200px; margin: 0 auto; }
           
           /* Styles for order lookup block */
@@ -270,8 +276,10 @@ export default async function handler(req, res) {
               height: 100%;
               background-color: #f9f9f9; 
               font-size: 8px;
-              line-height: 40px;
-              color: #bbb;
+              line-height: 10px; /* Зменшуємо лінійний простір, щоб вмістити текст */
+              padding: 5px 2px;
+              overflow: hidden; /* Обрізати довгий URL */
+              color: #888;
           }
           /* END NEW IMAGE STYLES */
 
@@ -294,6 +302,7 @@ export default async function handler(req, res) {
 
         <script>
             async function lookupOrder() {
+                // ... (JS функція без змін)
                 const input = document.getElementById('wixOrderId');
                 const resultSpan = document.getElementById('lookupResult');
                 const id = input.value.trim();
@@ -393,14 +402,18 @@ export default async function handler(req, res) {
         <tr>
           <td>${item.code}</td>
           
-          ${item.images.map((url, index) => `
-            <td class="img-cell" title="Фото ${index + 1}">
-              ${url 
-                ? `<img src="${url}" alt="Фото ${index + 1}" loading="lazy">` 
-                : `<span class="img-placeholder">-</span>`
-              }
-            </td>
-          `).join('')}
+          ${item.images.map((url, index) => {
+              const rawContent = item.rawImages[index] || '-'; // Сирий вміст для дебагу
+              
+              return `
+                <td class="img-cell" title="Фото ${index + 1}">
+                  ${url 
+                    ? `<img src="${url}" alt="Фото ${index + 1}" loading="lazy">` 
+                    : `<span class="img-placeholder">${rawContent.length > 10 ? 'CONTENT...' : rawContent}</span>`
+                  }
+                </td>
+              `;
+          }).join('')}
           <td>${item.sku}</td>
           <td>${item.name}</td>
           <td>${item.price.toFixed(2)} ₴</td>
