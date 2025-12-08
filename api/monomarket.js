@@ -279,17 +279,11 @@ export default async function handler(req, res) {
               object-fit: contain; 
               display: block;
               margin: 0 auto;
-              transition: transform 0.2s;
-              cursor: pointer;
+              /* УДАЛЕНО: transition: transform 0.2s; */
+              /* УДАЛЕНО: cursor: pointer; */
           }
-          .img-cell img:hover {
-              transform: scale(3.5); 
-              z-index: 10;
-              position: absolute;
-              border: 1px solid #ccc;
-              background: white;
-              box-shadow: 0 0 10px rgba(0,0,0,0.5);
-          }
+          /* УДАЛЕНО: .img-cell img:hover { ... } */
+          
           .img-placeholder {
               display: block;
               width: 100%;
