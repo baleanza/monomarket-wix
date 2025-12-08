@@ -3,13 +3,13 @@ import { ensureAuth } from '../lib/sheetsClient.js';
 
 const WIX_STORES_APP_ID = "215238eb-22a5-4c36-9e7b-e7c08025e04e"; 
 
-// === НАСТРОЙКИ НАЗВАНИЙ ДОСТАВКИ ===
+// === НАЛАШТУВАННЯ НАЗВ ДОСТАВКИ ===
 const SHIPPING_TITLES = {
     BRANCH: "Нова Пошта (Відділення)", 
     COURIER: "Нова Пошта (Кур'єр)"
 };
 
-// Хелпер для создания кастомных ошибок
+// Хелпер для створення кастомних помилок
 function createError(status, message, code = null) {
     const err = new Error(message);
     err.status = status;
@@ -17,7 +17,7 @@ function createError(status, message, code = null) {
     return err;
 }
 
-// Нормализация SKU: строка, без пробелов
+// Нормалізація SKU: рядок, без пробілів
 function normalizeSku(sku) {
     if (!sku) return '';
     return String(sku).trim();
@@ -90,18 +90,19 @@ export default async function handler(req, res) {
   try {
     const murkitData = req.body;
     
+    // Валідація номеру замовлення
     if (!murkitData.number) throw createError(400, 'Missing order number');
     const murkitOrderId = String(murkitData.number);
     console.log(`Processing Murkit Order #${murkitOrderId}`);
 
-    // === ШАГ 0: ДЕДУПЛИКАЦИЯ ===
+    // === КРОК 0: ДЕДУПЛІКАЦІЯ ===
     const existingOrder = await findWixOrderByExternalId(murkitOrderId);
     if (existingOrder) {
         console.log(`Order #${murkitOrderId} already exists. ID: ${existingOrder.id}`);
         return res.status(200).json({ "id": existingOrder.id });
     }
 
-    // === ВАЛИДАЦИЯ ===
+    // === ВАЛІДАЦІЯ ТОВАРІВ ===
     const murkitItems = murkitData.items || [];
     if (murkitItems.length === 0) throw createError(400, 'No items in order');
 
@@ -128,65 +129,74 @@ export default async function handler(req, res) {
     // 3. Fetch Wix Products
     const wixProducts = await getProductsBySkus(wixSkusToFetch);
     
+    // === СТВОРЕННЯ МАПИ SKU (Flattening) ===
+    // Щоб точно знаходити варіанти, ми "розгортаємо" структуру Wix в плаский об'єкт
+    const skuMap = {};
+
+    wixProducts.forEach(p => {
+        // Додаємо батьківський SKU
+        const pSku = normalizeSku(p.sku);
+        if (pSku) {
+            skuMap[pSku] = {
+                type: 'product',
+                product: p,
+                variantData: null
+            };
+        }
+
+        // Додаємо SKU варіантів
+        if (p.variants && p.variants.length > 0) {
+            p.variants.forEach(v => {
+                const vSku = normalizeSku(v.variant?.sku);
+                if (vSku) {
+                    skuMap[vSku] = {
+                        type: 'variant',
+                        product: p,
+                        variantData: v
+                    };
+                }
+            });
+        }
+    });
+
     // 4. Line Items
     const lineItems = [];
     
     for (const item of itemsWithSku) {
         const requestedQty = parseInt(item.quantity || 1, 10);
-        const targetSku = normalizeSku(item.wixSku); // Целевой SKU
+        const targetSku = normalizeSku(item.wixSku); // Цільовий SKU
 
-        // === ГЛУБОКИЙ ПОИСК (ПРИОРИТЕТ ВАРИАНТОВ) ===
-        // Мы не используем простой .find() по продуктам, мы ищем точное вхождение SKU
-        
-        let foundProduct = null;
-        let foundVariant = null;
-        let isVariantMatch = false;
+        // МИТТЄВИЙ ПОШУК ПО МАПІ
+        const match = skuMap[targetSku];
 
-        // 1. Сначала ищем среди ВАРИАНТОВ всех продуктов
-        for (const p of wixProducts) {
-            if (p.variants && p.variants.length > 0) {
-                const vMatch = p.variants.find(v => normalizeSku(v.variant?.sku) === targetSku);
-                if (vMatch) {
-                    foundProduct = p;
-                    foundVariant = vMatch;
-                    isVariantMatch = true;
-                    break; // Нашли вариант, выходим
-                }
-            }
-        }
-
-        // 2. Если в вариантах не нашли, ищем среди РОДИТЕЛЬСКИХ SKU
-        if (!foundProduct) {
-            foundProduct = wixProducts.find(p => normalizeSku(p.sku) === targetSku);
-        }
-
-        // === ОБРАБОТКА ОШИБКИ 409 (ТОВАР НЕ НАЙДЕН) ===
-        if (!foundProduct) {
-            // Формируем ошибку строго по запросу
+        // === ПОМИЛКА: ТОВАР НЕ ЗНАЙДЕНО (409) ===
+        if (!match) {
             throw createError(409, `Product with code ${item.code} not found`, "ITEM_NOT_FOUND");
         }
 
-        // Данные для заполнения
+        const foundProduct = match.product;
+        const foundVariant = match.variantData; // null, якщо це простий товар
+
         let catalogItemId = foundProduct.id; 
         let variantId = null;
-        let stockData = foundProduct.stock; // Дефолт (родитель)
+        let stockData = foundProduct.stock; // Дефолт (батьківський)
         let productName = foundProduct.name;
         
         let variantChoices = null; 
         let descriptionLines = []; 
         
-        // Если нашли конкретный ВАРИАНТ
-        if (isVariantMatch && foundVariant) {
-            console.log(`[INFO] SKU ${targetSku} identified as VARIANT: ${foundVariant.variant.id}`);
+        // ЯКЩО ЦЕ ВАРІАНТ
+        if (foundVariant) {
+            console.log(`[INFO] SKU ${targetSku} confirmed as VARIANT: ${foundVariant.variant.id}`);
             
             variantId = foundVariant.variant.id; 
             stockData = foundVariant.stock; 
             
-            // Вытаскиваем опции (Choices)
-            if (foundVariant.variant.choices) {
-                variantChoices = foundVariant.variant.choices; // {"Color": "Red"}
+            // ВАЖЛИВО: Опції лежать в корені об'єкта варіанта (foundVariant.choices)
+            if (foundVariant.choices) {
+                variantChoices = foundVariant.choices; 
                 
-                // Формируем descriptionLines (для UI заказа)
+                // Формуємо descriptionLines
                 descriptionLines = Object.entries(variantChoices).map(([k, v]) => ({
                     name: { original: k, translated: k },
                     plainText: { original: v, translated: v },
@@ -194,15 +204,19 @@ export default async function handler(req, res) {
                 }));
             }
         } else {
-            console.log(`[INFO] SKU ${targetSku} identified as PRODUCT (No variant specific match)`);
+            console.log(`[INFO] SKU ${targetSku} confirmed as SIMPLE PRODUCT`);
         }
 
-        // === ПРОВЕРКИ СТОКА (ТОЖЕ 409, НО ДРУГОЕ СООБЩЕНИЕ) ===
+        // === ПЕРЕВІРКА СТОКУ (409 ITEM_NOT_AVAILABLE) ===
+        
+        // 1. Якщо товар помічений як "немає в наявності"
         if (stockData.inStock === false) {
-             throw createError(409, `SKU '${targetSku}' is out of stock`);
+             throw createError(409, `Product with code ${item.code} has not enough stock`, "ITEM_NOT_AVAILABLE");
         }
+        
+        // 2. Якщо увімкнено трекінг кількості і її не вистачає
         if (stockData.trackQuantity && (stockData.quantity < requestedQty)) {
-             throw createError(409, `Insufficient stock for SKU '${targetSku}'. Available: ${stockData.quantity}`);
+             throw createError(409, `Product with code ${item.code} has not enough stock`, "ITEM_NOT_AVAILABLE");
         }
 
         // Картинка
@@ -215,7 +229,7 @@ export default async function handler(req, res) {
             };
         }
 
-        // Формируем ссылку на каталог
+        // Формуємо посилання на каталог
         const catalogRef = {
             catalogItemId: catalogItemId,
             appId: WIX_STORES_APP_ID
@@ -223,7 +237,7 @@ export default async function handler(req, res) {
 
         if (variantId) {
             catalogRef.options = { variantId: variantId };
-            // Критично: добавляем карту опций, чтобы Wix "понял", что это за вариант
+            // Додаємо карту опцій, щоб Wix коректно відобразив варіант
             if (variantChoices) {
                 catalogRef.options.options = variantChoices;
             }
@@ -233,7 +247,7 @@ export default async function handler(req, res) {
             quantity: requestedQty,
             catalogReference: catalogRef,
             productName: { original: productName },
-            descriptionLines: descriptionLines, // Передаем опции для отображения
+            descriptionLines: descriptionLines, // Передаємо опції
             itemType: { preset: "PHYSICAL" },
             physicalProperties: { sku: targetSku, shippable: true },
             price: { amount: fmtPrice(item.price) },
@@ -261,7 +275,7 @@ export default async function handler(req, res) {
         total: { amount: fmtPrice(murkitData.sum), currency }
     };
 
-    // === ЛОГИКА ДОСТАВКИ ===
+    // === ЛОГІКА ДОСТАВКИ ===
     const d = murkitData.delivery || {}; 
     const deliveryType = String(murkitData.deliveryType || '');
     
@@ -276,7 +290,7 @@ export default async function handler(req, res) {
     let deliveryTitle = "Delivery";
 
     if (deliveryType.includes('courier')) {
-        // КУРЬЕР
+        // КУР'ЄР
         deliveryTitle = SHIPPING_TITLES.COURIER; 
         
         const addressParts = [];
@@ -289,7 +303,7 @@ export default async function handler(req, res) {
             : `Адресна доставка (${npCity})`;
 
     } else {
-        // ОТДЕЛЕНИЕ
+        // ВІДДІЛЕННЯ
         deliveryTitle = SHIPPING_TITLES.BRANCH; 
         
         if (npWarehouse) {
@@ -363,15 +377,15 @@ export default async function handler(req, res) {
     
     const status = e.status || 500;
     
-    // Кастомный формат ответа для ITEM_NOT_FOUND (409)
-    if (status === 409 && e.code === 'ITEM_NOT_FOUND') {
+    // Кастомний формат відповіді для бізнес-помилок 409
+    if (status === 409 && (e.code === 'ITEM_NOT_FOUND' || e.code === 'ITEM_NOT_AVAILABLE')) {
         return res.status(409).json({
             message: e.message,
             code: e.code
         });
     }
 
-    // Обычный формат ошибки
+    // Звичайний формат помилки
     res.status(status).json({ 
         error: e.message 
     });
