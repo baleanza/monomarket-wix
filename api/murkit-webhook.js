@@ -85,7 +85,7 @@ export default async function handler(req, res) {
         return res.status(200).json({ "id": existingOrder.id });
     }
 
-    // === СОЗДАНИЕ ЗАКАЗА ===
+    // === СОЗДАНИЕ ===
     const murkitItems = murkitData.items || [];
     if (murkitItems.length === 0) return res.status(400).json({ error: 'No items in order' });
 
@@ -117,8 +117,9 @@ export default async function handler(req, res) {
     
     for (const item of itemsWithSku) {
         const requestedQty = parseInt(item.quantity || 1, 10);
-        const targetSku = item.wixSku;
+        const targetSku = item.wixSku; // Это SKU варианта (например 2113600000)
 
+        // Находим родительский товар, в котором этот SKU упоминается (в самом товаре ИЛИ в вариантах)
         const productMatch = wixProducts.find(p => {
             if (String(p.sku) === targetSku) return true;
             if (p.variants) return p.variants.some(v => String(v.variant?.sku) === targetSku);
@@ -134,6 +135,39 @@ export default async function handler(req, res) {
         let stockData = productMatch.stock;
         let productName = productMatch.name;
         
+        let variantChoices = null; // {"Аромат": "Хвоя"}
+        let descriptionLines = []; // Для отображения в заказе
+
+        // === ГЛАВНОЕ ИЗМЕНЕНИЕ: ИЩЕМ ВАРИАНТ ЯВНО ===
+        // Проверяем, есть ли этот SKU среди вариантов.
+        let matchingVariant = null;
+        if (productMatch.variants && productMatch.variants.length > 0) {
+            matchingVariant = productMatch.variants.find(v => String(v.variant?.sku) === targetSku);
+        }
+
+        if (matchingVariant) {
+            // Если нашли конкретный вариант с таким SKU
+            variantId = matchingVariant.variant.id;
+            stockData = matchingVariant.stock;
+            
+            // Вытаскиваем опции (Choices)
+            if (matchingVariant.variant.choices) {
+                variantChoices = matchingVariant.variant.choices;
+                
+                // Формируем descriptionLines
+                // Wix требует структуру: name: {original: Key}, plainText: {original: Value}
+                descriptionLines = Object.entries(variantChoices).map(([k, v]) => ({
+                    name: { original: k, translated: k },
+                    plainText: { original: v, translated: v },
+                    lineType: "PLAIN_TEXT"
+                }));
+            }
+
+        } else {
+            // Если вариант не найден, значит это "простой" товар (или SKU совпал с родительским)
+            // Оставляем stockData от родителя и variantChoices = null
+        }
+
         // Картинка
         let imageObj = null;
         if (productMatch.media && productMatch.media.mainMedia && productMatch.media.mainMedia.image) {
@@ -144,31 +178,6 @@ export default async function handler(req, res) {
             };
         }
 
-        // Данные для опций
-        let variantChoices = null; // Здесь будет объект {"Аромат": "Чебрець"}
-        let descriptionLines = [];
-        
-        // Поиск Варианта
-        if (String(productMatch.sku) !== targetSku && productMatch.variants) {
-            const variantMatch = productMatch.variants.find(v => String(v.variant?.sku) === targetSku);
-            if (variantMatch) {
-                variantId = variantMatch.variant.id; 
-                stockData = variantMatch.stock; 
-                
-                // Сохраняем выбор опций (Critical Fix!)
-                if (variantMatch.variant.choices) {
-                    variantChoices = variantMatch.variant.choices;
-
-                    // Формируем descriptionLines для отображения
-                    descriptionLines = Object.entries(variantChoices).map(([optName, optValue]) => ({
-                        name: { original: optName, translated: optName },
-                        plainText: { original: optValue, translated: optValue },
-                        lineType: "PLAIN_TEXT"
-                    }));
-                }
-            }
-        }
-
         if (stockData.trackQuantity && (stockData.quantity < requestedQty)) {
              throw new Error(`Insufficient stock for SKU '${targetSku}'. Requested: ${requestedQty}, Available: ${stockData.quantity}`);
         }
@@ -176,17 +185,14 @@ export default async function handler(req, res) {
              throw new Error(`SKU '${targetSku}' is marked as Out of Stock in Wix.`);
         }
 
-        // Формируем Catalog Reference (С УЧЕТОМ OPTIONS)
         const catalogRef = {
             catalogItemId: catalogItemId,
             appId: WIX_STORES_APP_ID
         };
 
         if (variantId) {
-            catalogRef.options = { 
-                variantId: variantId
-            };
-            // ВАЖНО: Добавляем карту опций, если она есть
+            catalogRef.options = { variantId: variantId };
+            // Добавляем опции в catalogReference (как в примере успешного заказа)
             if (variantChoices) {
                 catalogRef.options.options = variantChoices;
             }
@@ -196,7 +202,7 @@ export default async function handler(req, res) {
             quantity: requestedQty,
             catalogReference: catalogRef,
             productName: { original: productName },
-            descriptionLines: descriptionLines, // Передаем линии описания
+            descriptionLines: descriptionLines, // Теперь массив заполнен
             itemType: { preset: "PHYSICAL" },
             physicalProperties: { sku: targetSku, shippable: true },
             price: { amount: fmtPrice(item.price) },
@@ -239,7 +245,7 @@ export default async function handler(req, res) {
     let deliveryTitle = "Delivery";
 
     if (deliveryType.includes('courier')) {
-        // === КУРЬЕР ===
+        // КУРЬЕР
         deliveryTitle = SHIPPING_TITLES.COURIER; 
         
         const addressParts = [];
@@ -252,7 +258,7 @@ export default async function handler(req, res) {
             : `Адресна доставка (${npCity})`;
 
     } else {
-        // === ОТДЕЛЕНИЕ ===
+        // ОТДЕЛЕНИЕ
         deliveryTitle = SHIPPING_TITLES.BRANCH; 
         
         if (npWarehouse) {
