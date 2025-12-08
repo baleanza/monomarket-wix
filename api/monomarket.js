@@ -2,6 +2,37 @@
 import { ensureAuth, cleanPrice } from '../lib/sheetsClient.js'; 
 import { getInventoryBySkus } from '../lib/wixClient.js';
 
+// --- NEW HELPER FUNCTION FOR CLOUDINARY TRANSFORMATION ---
+function modifyImageUrl(originalUrl) {
+    if (!originalUrl || originalUrl === 'CellImage' || originalUrl.toLowerCase().includes('no photo')) {
+        return '';
+    }
+    
+    // Transformation to inject (based on user's formula logic)
+    const transformation = 't_JPG_w240h160_cropped30/';
+    const uploadBase = 'upload/';
+    
+    if (originalUrl.includes(uploadBase)) {
+        // Find the index right after the 'upload/' segment
+        const index = originalUrl.indexOf(uploadBase) + uploadBase.length;
+        
+        // Insert the transformation string, but first ensure no other transformation exists right after 'upload/'
+        let modifiedUrl = originalUrl.slice(0, index);
+        const remainingPath = originalUrl.slice(index);
+        
+        // If the remaining path already contains 'v' (version segment), it should go after it, 
+        // but since the original formula just did a SUBSTITUTE on the base, we stick to replacing the upload path.
+        // Assuming clean URL format: .../upload/[version]/[path]
+        
+        // Simple insertion after 'upload/'
+        return originalUrl.slice(0, index) + transformation + originalUrl.slice(index);
+    }
+    
+    return originalUrl; 
+}
+// --- END HELPER FUNCTION ---
+
+
 // Read data from Google Sheets
 async function readSheetData(sheets, spreadsheetId) {
     const importRes = await sheets.spreadsheets.values.get({
@@ -130,9 +161,10 @@ export default async function handler(req, res) {
       const images = [];
       imageCols.forEach(imgCol => {
           if (imgCol.index > -1) {
-              // Ensure URL is a non-empty string
-              const url = row[imgCol.index] ? String(row[imgCol.index]).trim() : '';
-              images.push(url);
+              const rawUrl = row[imgCol.index] ? String(row[imgCol.index]).trim() : '';
+              // APPLY MODIFICATION HERE
+              const modifiedUrl = modifyImageUrl(rawUrl);
+              images.push(modifiedUrl);
           } else {
               images.push(''); // Placeholder for missing mapping
           }
@@ -144,7 +176,7 @@ export default async function handler(req, res) {
         name: colName > -1 ? row[colName] : '(Без назви)',
         priceRaw: priceVal,
         price: cleanPrice(priceVal),
-        images: images // NEW
+        images: images 
       });
     });
 
@@ -213,6 +245,7 @@ export default async function handler(req, res) {
               vertical-align: middle;
               line-height: 0; 
               border-left: 1px dashed #eee; 
+              position: relative; /* For image hover effect */
           }
           .img-cell img {
               max-width: 40px;
@@ -362,7 +395,7 @@ export default async function handler(req, res) {
           
           ${item.images.map((url, index) => `
             <td class="img-cell" title="Фото ${index + 1}">
-              ${url && url !== 'CellImage' // Google Sheets sometimes returns 'CellImage' string
+              ${url 
                 ? `<img src="${url}" alt="Фото ${index + 1}" loading="lazy">` 
                 : `<span class="img-placeholder">-</span>`
               }
