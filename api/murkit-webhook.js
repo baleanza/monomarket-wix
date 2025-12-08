@@ -5,9 +5,16 @@ const WIX_STORES_APP_ID = "215238eb-22a5-4c36-9e7b-e7c08025e04e";
 
 // === НАСТРОЙКИ НАЗВАНИЙ ДОСТАВКИ ===
 const SHIPPING_TITLES = {
-    BRANCH: "НП Відділення", 
-    COURIER: "НП Кур'єр"
+    BRANCH: "Нова Пошта (Відділення)", 
+    COURIER: "Нова Пошта (Кур'єр)"
 };
+
+// Вспомогательная функция для создания ошибок с кодом
+function createError(status, message) {
+    const err = new Error(message);
+    err.status = status;
+    return err;
+}
 
 function checkAuth(req) {
   const authHeader = req.headers.authorization;
@@ -75,19 +82,27 @@ export default async function handler(req, res) {
 
   try {
     const murkitData = req.body;
+    
+    // Валидация входных данных (400)
+    if (!murkitData.number) {
+        throw createError(400, 'Missing order number');
+    }
+
     const murkitOrderId = String(murkitData.number);
     console.log(`Processing Murkit Order #${murkitOrderId}`);
 
-    // === ШАГ 0: ДЕДУПЛИКАЦИЯ ===
+    // === ШАГ 0: ДЕДУПЛИКАЦИЯ (200 OK) ===
     const existingOrder = await findWixOrderByExternalId(murkitOrderId);
     if (existingOrder) {
         console.log(`Order #${murkitOrderId} already exists. ID: ${existingOrder.id}`);
         return res.status(200).json({ "id": existingOrder.id });
     }
 
-    // === СОЗДАНИЕ ===
+    // === ВАЛИДАЦИЯ ТОВАРОВ (400) ===
     const murkitItems = murkitData.items || [];
-    if (murkitItems.length === 0) return res.status(400).json({ error: 'No items in order' });
+    if (murkitItems.length === 0) {
+        throw createError(400, 'No items in order');
+    }
 
     const currency = "UAH";
 
@@ -106,7 +121,7 @@ export default async function handler(req, res) {
     });
 
     if (wixSkusToFetch.length === 0) {
-        return res.status(400).json({ error: 'No valid SKUs found to fetch from Wix' });
+        throw createError(400, 'No valid SKUs found to fetch from Wix');
     }
 
     // 3. Fetch Wix Products
@@ -117,17 +132,18 @@ export default async function handler(req, res) {
     
     for (const item of itemsWithSku) {
         const requestedQty = parseInt(item.quantity || 1, 10);
-        const targetSku = item.wixSku; // Это SKU варианта (например 2113600000)
+        const targetSku = item.wixSku; 
 
-        // Находим родительский товар, в котором этот SKU упоминается (в самом товаре ИЛИ в вариантах)
+        // Ищем товар
         const productMatch = wixProducts.find(p => {
             if (String(p.sku) === targetSku) return true;
             if (p.variants) return p.variants.some(v => String(v.variant?.sku) === targetSku);
             return false;
         });
 
+        // БИЗНЕС ОШИБКА: Товар не найден (409 Conflict)
         if (!productMatch) {
-            throw new Error(`Product with SKU '${targetSku}' (Murkit Code: ${item.code}) not found in Wix.`);
+            throw createError(409, `Product with SKU '${targetSku}' (Murkit Code: ${item.code}) not found in Wix.`);
         }
 
         let catalogItemId = productMatch.id; 
@@ -135,37 +151,37 @@ export default async function handler(req, res) {
         let stockData = productMatch.stock;
         let productName = productMatch.name;
         
-        let variantChoices = null; // {"Аромат": "Хвоя"}
-        let descriptionLines = []; // Для отображения в заказе
-
-        // === ГЛАВНОЕ ИЗМЕНЕНИЕ: ИЩЕМ ВАРИАНТ ЯВНО ===
-        // Проверяем, есть ли этот SKU среди вариантов.
+        let variantChoices = null; 
+        let descriptionLines = []; 
+        
+        // Поиск Варианта
         let matchingVariant = null;
         if (productMatch.variants && productMatch.variants.length > 0) {
             matchingVariant = productMatch.variants.find(v => String(v.variant?.sku) === targetSku);
         }
 
         if (matchingVariant) {
-            // Если нашли конкретный вариант с таким SKU
-            variantId = matchingVariant.variant.id;
-            stockData = matchingVariant.stock;
+            variantId = matchingVariant.variant.id; 
+            stockData = matchingVariant.stock; 
             
-            // Вытаскиваем опции (Choices)
             if (matchingVariant.variant.choices) {
                 variantChoices = matchingVariant.variant.choices;
-                
-                // Формируем descriptionLines
-                // Wix требует структуру: name: {original: Key}, plainText: {original: Value}
                 descriptionLines = Object.entries(variantChoices).map(([k, v]) => ({
                     name: { original: k, translated: k },
                     plainText: { original: v, translated: v },
                     lineType: "PLAIN_TEXT"
                 }));
             }
+        }
 
-        } else {
-            // Если вариант не найден, значит это "простой" товар (или SKU совпал с родительским)
-            // Оставляем stockData от родителя и variantChoices = null
+        // БИЗНЕС ОШИБКА: Нет на остатках (409 Conflict)
+        if (stockData.inStock === false) {
+             throw createError(409, `SKU '${targetSku}' is marked as Out of Stock in Wix.`);
+        }
+
+        // БИЗНЕС ОШИБКА: Не хватает количества (409 Conflict)
+        if (stockData.trackQuantity && (stockData.quantity < requestedQty)) {
+             throw createError(409, `Insufficient stock for SKU '${targetSku}'. Requested: ${requestedQty}, Available: ${stockData.quantity}`);
         }
 
         // Картинка
@@ -178,13 +194,7 @@ export default async function handler(req, res) {
             };
         }
 
-        if (stockData.trackQuantity && (stockData.quantity < requestedQty)) {
-             throw new Error(`Insufficient stock for SKU '${targetSku}'. Requested: ${requestedQty}, Available: ${stockData.quantity}`);
-        }
-        if (stockData.inStock === false) {
-             throw new Error(`SKU '${targetSku}' is marked as Out of Stock in Wix.`);
-        }
-
+        // Формируем Catalog Reference
         const catalogRef = {
             catalogItemId: catalogItemId,
             appId: WIX_STORES_APP_ID
@@ -192,7 +202,6 @@ export default async function handler(req, res) {
 
         if (variantId) {
             catalogRef.options = { variantId: variantId };
-            // Добавляем опции в catalogReference (как в примере успешного заказа)
             if (variantChoices) {
                 catalogRef.options.options = variantChoices;
             }
@@ -202,7 +211,7 @@ export default async function handler(req, res) {
             quantity: requestedQty,
             catalogReference: catalogRef,
             productName: { original: productName },
-            descriptionLines: descriptionLines, // Теперь массив заполнен
+            descriptionLines: descriptionLines,
             itemType: { preset: "PHYSICAL" },
             physicalProperties: { sku: targetSku, shippable: true },
             price: { amount: fmtPrice(item.price) },
@@ -323,13 +332,19 @@ export default async function handler(req, res) {
 
     const createdOrder = await createWixOrder(wixOrderPayload);
     
-    // === УСПЕХ: 201 Created + ID ===
+    // === 201 Created ===
     res.status(201).json({ 
         "id": createdOrder.order?.id
     });
 
   } catch (e) {
     console.error('Murkit Webhook Error:', e.message);
-    res.status(500).json({ error: e.message });
+    
+    // Если у ошибки есть статус (400 или 409), используем его. Иначе 500.
+    const status = e.status || 500;
+    
+    res.status(status).json({ 
+        error: e.message 
+    });
   }
 }
