@@ -329,7 +329,7 @@ export default async function handler(req, res) {
 
     const wixOrderPayload = {
         channelInfo: {
-            type: "OTHER_PLATFORM",
+            type: "WEB",
             externalOrderId: murkitOrderId
         },
         status: "APPROVED",
