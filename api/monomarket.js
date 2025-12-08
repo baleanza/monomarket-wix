@@ -1,3 +1,4 @@
+// api/monomarket.js
 import { ensureAuth, cleanPrice } from '../lib/sheetsClient.js'; 
 import { getInventoryBySkus } from '../lib/wixClient.js';
 
@@ -33,7 +34,7 @@ export default async function handler(req, res) {
     const headers = importValues[0];
     const dataRows = importValues.slice(1);
     
-    // Парсим настройки фида, чтобы найти соответствие колонок
+    // Парсим настройки фида
     const controlHeaders = controlValues[0] || [];
     const idxImportField = controlHeaders.indexOf('Import field');
     const idxFeedName = controlHeaders.indexOf('Feed name');
@@ -57,17 +58,21 @@ export default async function handler(req, res) {
       if (colName > -1) break;
     }
 
-    // 2. Ищем колонку SKU (для связи с Wix)
+    // 2. Ищем колонку SKU
     const colSku = headers.indexOf(fieldMap['sku'] || 'SKU'); 
     
     // 3. Ищем колонку Price
     const colPrice = headers.indexOf(fieldMap['price'] || 'Price');
 
-    // 4. Ищем колонку Code (Product ID для вывода в начале)
-    // Если в маппинге нет 'code', пробуем искать по имени заголовка 'code' или берем SKU как фоллбэк
-    let colCode = headers.indexOf(fieldMap['code']);
-    if (colCode === -1) colCode = headers.indexOf('code');
-    // Если все еще нет, можно оставить пустым или дублировать SKU. Оставим пустым, если не найдено.
+    // 4. Ищем колонку Code (Product ID)
+    let colCode = -1;
+    if (fieldMap['code']) {
+        colCode = headers.indexOf(fieldMap['code']);
+    }
+    // Если в маппинге нет, ищем просто по названию "code"
+    if (colCode === -1) {
+        colCode = headers.indexOf('code');
+    }
 
     if (colSku === -1) return res.status(500).send('<h1>Помилка: Не знайдено колонку SKU для синхронізації</h1>');
 
@@ -81,11 +86,11 @@ export default async function handler(req, res) {
       skus.push(sku);
       
       const priceVal = colPrice > -1 ? row[colPrice] : '0';
-      const codeVal = colCode > -1 ? (row[colCode] || '') : ''; // Значение Product ID
+      const codeVal = colCode > -1 ? (row[colCode] || '') : ''; 
       
       tableData.push({
         sku: sku,
-        code: codeVal, // Добавляем code в объект данных
+        code: codeVal,
         name: colName > -1 ? row[colName] : '(Без назви)',
         priceRaw: priceVal,
         price: cleanPrice(priceVal)
@@ -100,25 +105,106 @@ export default async function handler(req, res) {
       stockMap[String(item.sku).trim()] = item;
     });
 
+    // HTML СТРАНИЦЫ
     let html = `
     <html>
       <head>
-        <title>Product Table</title>
+        <title>Monomarket Control</title>
         <meta charset="UTF-8">
         <style>
-          body { font-family: sans-serif; padding: 20px; }
-          table { border-collapse: collapse; width: 100%; max-width: 1200px; margin-top: 15px; }
+          body { font-family: sans-serif; padding: 20px; max-width: 1200px; margin: 0 auto; }
+          
+          /* Стили для блока поиска заказа */
+          .order-lookup-box {
+            background-color: #f0f7ff;
+            border: 1px solid #cce5ff;
+            border-radius: 6px;
+            padding: 15px;
+            margin-bottom: 25px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+          }
+          .order-lookup-box input {
+            padding: 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            width: 350px;
+            font-size: 14px;
+          }
+          .order-lookup-box button {
+            padding: 8px 15px;
+            background-color: #0070f3;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+          }
+          .order-lookup-box button:hover { background-color: #005bb5; }
+          .lookup-result { font-weight: bold; font-size: 16px; margin-left: 10px; }
+          .res-success { color: #0070f3; }
+          .res-error { color: #d93025; }
+
+          /* Стили таблицы */
+          table { border-collapse: collapse; width: 100%; margin-top: 15px; }
           th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
           th { background-color: #f2f2f2; }
           .instock { background-color: #d4edda; color: #155724; font-weight: bold; }
           .outstock { background-color: #f8d7da; color: #721c24; }
           .warn { background-color: #fff3cd; color: #856404; }
-          h2 { margin-bottom: 5px; }
+          h2 { margin-bottom: 10px; margin-top: 30px;}
           .summary { margin-bottom: 20px; font-size: 14px; color: #666; }
         </style>
       </head>
       <body>
-        <h2>Product Table</h2>
+        
+        <h2>Перевірка номера замовлення</h2>
+        <div class="order-lookup-box">
+            <strong>Wix Order ID:</strong>
+            <input type="text" id="wixOrderId" placeholder="Вставте ID (наприклад: 89700e12-...)">
+            <button onclick="lookupOrder()">Отримати номер</button>
+            <span id="lookupResult" class="lookup-result"></span>
+        </div>
+
+        <script>
+            async function lookupOrder() {
+                const input = document.getElementById('wixOrderId');
+                const resultSpan = document.getElementById('lookupResult');
+                const id = input.value.trim();
+
+                if (!id) {
+                    resultSpan.textContent = "Введіть ID!";
+                    resultSpan.className = "lookup-result res-error";
+                    return;
+                }
+
+                resultSpan.textContent = "Пошук...";
+                resultSpan.className = "lookup-result";
+
+                try {
+                    // Используем существующий debug-api для получения JSON заказа
+                    const res = await fetch('/api/debug-order?id=' + encodeURIComponent(id));
+                    const data = await res.json();
+
+                    if (data.number) {
+                        resultSpan.textContent = "Номер замовлення: " + data.number;
+                        resultSpan.className = "lookup-result res-success";
+                    } else if (data.error) {
+                        resultSpan.textContent = "Помилка: " + data.error;
+                        resultSpan.className = "lookup-result res-error";
+                    } else {
+                        resultSpan.textContent = "Не знайдено або інша структура відповіді";
+                        resultSpan.className = "lookup-result res-error";
+                    }
+                } catch (e) {
+                    resultSpan.textContent = "Помилка запиту: " + e.message;
+                    resultSpan.className = "lookup-result res-error";
+                }
+            }
+        </script>
+
+        <h2>Monomarket Feed Table</h2>
         
         <div class="summary">
           Усього товарів у таблиці: ${tableData.length} <br>
@@ -128,7 +214,8 @@ export default async function handler(req, res) {
         <table>
           <thead>
             <tr>
-              <th>Product ID</th> <th>Артикул (SKU)</th>
+              <th>Product ID</th>
+              <th>Артикул (SKU)</th>
               <th>Назва</th>
               <th>Ціна (Sheet)</th>
               <th>Наявність (Wix)</th>
@@ -160,7 +247,8 @@ export default async function handler(req, res) {
 
       html += `
         <tr>
-          <td>${item.code}</td> <td>${item.sku}</td>
+          <td>${item.code}</td>
+          <td>${item.sku}</td>
           <td>${item.name}</td>
           <td>${item.price.toFixed(2)} ₴</td>
           <td class="${stockClass}">${stockText}</td>
