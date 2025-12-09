@@ -189,6 +189,7 @@ export default async function handler(req, res) {
         const wixOrderId = cancelOrderPathMatch[1]; 
 
         try {
+            // NOTE: cancelWixOrderById now automatically includes "restockAllItems": true
             const cancelResult = await cancelWixOrderById(wixOrderId);
 
             if (cancelResult.status === 404) {
@@ -335,7 +336,8 @@ export default async function handler(req, res) {
             const existingOrder = await findWixOrderByExternalId(murkitOrderId);
             if (existingOrder) {
                 console.log(`Order #${murkitOrderId} already exists. ID: ${existingOrder.id}`);
-                return res.status(200).json({ "id": existingOrder.id });
+                // FIX: Now returns the Wix UUID (ID) instead of the user-facing number.
+                return res.status(200).json({ "id": existingOrder.id }); 
             }
 
             // === ITEM VALIDATION ===
