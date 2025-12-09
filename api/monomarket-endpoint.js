@@ -58,12 +58,12 @@ async function readSheetData(sheets, spreadsheetId) {
             sheets.spreadsheets.values.get({ spreadsheetId, range: 'Feed Control List!A1:F' }),
         ]);
     } catch (e) {
-        // If Promise.all fails, re-throw a more informative error
+        // If Promise.all fails due to Auth/API issues, we re-throw a more informative error
         throw createError(500, `Failed to fetch data from Google Sheets: ${e.message}`, "SHEETS_API_ERROR");
     }
 
     // Safely access data using traditional checks (compatible with older Node.js runtimes)
-    // This prevents the "Cannot read properties of undefined" error.
+    // This prevents the "Cannot read properties of undefined" error if the response object is malformed
     const importValues = (importRes && importRes.data && importRes.data.values) ? importRes.data.values : [];
     const controlValues = (controlRes && controlRes.data && controlRes.data.values) ? controlRes.data.values : [];
 
