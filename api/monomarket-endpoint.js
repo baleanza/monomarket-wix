@@ -47,13 +47,21 @@ function checkAuth(req) {
 }
 
 // readSheetData (EXISTING)
+// FIX: Enhanced for robustness and parallel fetching to prevent "Cannot read properties of undefined" error.
 async function readSheetData(sheets, spreadsheetId) {
-  const importRes = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Import!A1:ZZ' });
-  const controlRes = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Feed Control List!A1:F' });
-  return { 
-    importValues: importRes.data.values || [], 
-    controlValues: controlRes.data.values || [] 
-  };
+    const [importRes, controlRes] = await Promise.all([
+        sheets.spreadsheets.values.get({ spreadsheetId, range: 'Import!A1:ZZ' }),
+        sheets.spreadsheets.values.get({ spreadsheetId, range: 'Feed Control List!A1:F' }),
+    ]);
+    
+    // Safely access data, falling back to an empty array if .data or .values is missing
+    const importValues = importRes?.data?.values || [];
+    const controlValues = controlRes?.data?.values || [];
+
+    return { 
+        importValues: importValues, 
+        controlValues: controlValues 
+    };
 }
 
 // getProductSkuMap (EXISTING)
@@ -128,7 +136,7 @@ function mapWixOrderToMurkitResponse(wixOrder, fulfillments, externalId) {
     // 3. Process Fulfillments to get the TTN (Tracking Number)
     if (Array.isArray(fulfillments) && fulfillments.length > 0) {
         const fulfillmentWithTtn = fulfillments
-            // FIX 2: Search for fulfillment where trackingNumber is a non-empty string.
+            // FIX: Search for fulfillment where trackingNumber is a non-empty string.
             .find(f => f.trackingInfo && String(f.trackingInfo.trackingNumber || '').trim().length > 0);
         
         if (fulfillmentWithTtn) {
@@ -162,7 +170,7 @@ export default async function handler(req, res) {
     }
     
     const urlPathFull = req.url;
-    // FIX 1: Clean URL path from query parameters that Vercel might add (like ?path=...)
+    // FIX: Clean URL path from query parameters that Vercel might add (like ?path=...)
     const urlPath = urlPathFull.split('?')[0]; 
 
     // --- 1. PUT Cancel Order Endpoint ---
