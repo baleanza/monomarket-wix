@@ -335,7 +335,7 @@ export default async function handler(req, res) {
             const existingOrder = await findWixOrderByExternalId(murkitOrderId);
             if (existingOrder) {
                 console.log(`Order #${murkitOrderId} already exists. ID: ${existingOrder.id}`);
-                return res.status(200).json({ "id": existingOrder.number || existingOrder.id });
+                return res.status(200).json({ "id": existingOrder.id });
             }
 
             // === ITEM VALIDATION ===
