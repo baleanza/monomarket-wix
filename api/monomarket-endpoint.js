@@ -46,25 +46,23 @@ function checkAuth(req) {
   return login === process.env.MURKIT_USER && password === process.env.MURKIT_PASS;
 }
 
-// readSheetData (FINAL FIX for "Cannot read properties of undefined")
-// FIX: Enhanced for robustness against intermittent API errors/timeouts 
-// when called within the complex order handler.
+// readSheetData (FINAL FIX: Changed from Promise.all to Sequential Fetching)
 async function readSheetData(sheets, spreadsheetId) {
     let importRes, controlRes;
     
-    // Log for debugging start
-    console.log('Sheets: Starting fetch for Import and Feed Control Lists.');
+    console.log('Sheets: Starting SEQUENTIAL fetch for Import and Feed Control Lists.');
     
     try {
-        // Fetch both sheets concurrently
-        [importRes, controlRes] = await Promise.all([
-            sheets.spreadsheets.values.get({ spreadsheetId, range: 'Import!A1:ZZ' }),
-            sheets.spreadsheets.values.get({ spreadsheetId, range: 'Feed Control List!A1:F' }),
-        ]);
+        // FIX: Fetch 1: Import List (Sequential call)
+        importRes = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Import!A1:ZZ' });
+        
+        // FIX: Fetch 2: Control List (Sequential call)
+        controlRes = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Feed Control List!A1:F' });
         
     } catch (e) {
-        // If Promise.all fails due to Auth/API issues, we log the failure and throw
-        console.error('Sheets API Call FAILED (Caught in readSheetData):', e.message);
+        // Log the full error from the sequential attempts
+        console.error('Sheets API Call FAILED (Sequential Catch):', e.message);
+        // Throw a specific error that prevents the downstream process from crashing
         throw createError(500, `Failed to fetch data from Google Sheets (API ERROR): ${e.message}`, "SHEETS_API_ERROR");
     }
 
@@ -74,11 +72,10 @@ async function readSheetData(sheets, spreadsheetId) {
     
     // CRITICAL CHECK: If data is unexpectedly empty, treat it as an error
     if (importValues.length === 0 || controlValues.length === 0) {
-        // This suggests the API succeeded but returned no data, potentially a permission issue for that specific range
         throw createError(500, 'Sheets: Empty or invalid data retrieved from critical sheets (check data ranges and sheet names).', "SHEETS_DATA_EMPTY");
     }
     
-    console.log('Sheets: Data fetched successfully.');
+    console.log('Sheets: Data fetched successfully (Sequential).');
     
     return { 
         importValues: importValues, 
