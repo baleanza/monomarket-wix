@@ -1,468 +1,573 @@
-// api/monomarket.js
-import { ensureAuth, cleanPrice } from '../lib/sheetsClient.js'; 
-import { getInventoryBySkus } from '../lib/wixClient.js';
+import { 
+    createWixOrder, 
+    getProductsBySkus, 
+    // For deduplication (search by Murkit ID)
+    findWixOrderByExternalId, 
+    // For status/cancellation (search by Wix ID)
+    findWixOrderById, 
+    getWixOrderFulfillments, 
+    cancelWixOrderById
+} from '../lib/wixClient.js'; 
+import { ensureAuth } from '../lib/sheetsClient.js'; 
 
-// --- HELPER FUNCTION FOR CLOUDINARY TRANSFORMATION ---
-function modifyImageUrl(originalUrl) {
-    if (typeof originalUrl !== 'string') originalUrl = '';
-    originalUrl = originalUrl.trim();
-    
-    // Filter out empty, Google Sheets internal image strings, or explicit 'no photo' text
-    if (!originalUrl || originalUrl === 'CellImage' || originalUrl.toLowerCase().includes('no photo')) {
-        return '';
-    }
-    
-    // Transformation to inject (based on user's desired format)
-    const transformation = 't_JPG_w240h160_cropped30/';
-    const uploadBase = '/upload/';
-    
-    // Apply transformation only to Cloudinary URLs
-    if (originalUrl.includes('res.cloudinary.com/') && originalUrl.includes(uploadBase)) {
-        // Find the index right after the 'upload/' segment
-        const index = originalUrl.indexOf(uploadBase) + uploadBase.length;
-        
-        // Insert the transformation string
-        let modifiedUrl = originalUrl.slice(0, index) + transformation + originalUrl.slice(index);
+const WIX_STORES_APP_ID = "215238eb-22a5-4c36-9e7b-e7c08025e04e"; 
 
-        // Prevent double insertion if the URL already contained a transformation string
-        if (modifiedUrl.includes(transformation + transformation)) {
-             modifiedUrl = modifiedUrl.replace(transformation + transformation, transformation);
-        }
+// === MAPPING FOR ORDER CREATION (Murkit Input -> Wix Title) ===
+const MURKIT_TO_WIX_CREATION_MAPPING = {
+    "nova-post": "НП Відділення", // Standard for branches and postamats
+    "courier-nova-post": "НП Кур'єр"
+};
 
-        return modifiedUrl;
-    }
-    
-    // For non-Cloudinary URLs, return the original URL
-    return originalUrl; 
+// === MAPPING FOR STATUS RETRIEVAL (Wix Title -> Murkit Output) ===
+const WIX_TO_MURKIT_STATUS_MAPPING = {
+    "НП Відділення": "nova-post", 
+    "НП Кур'єр": "courier-nova-post",
+    "НП Поштомат": "nova-post"
+};
+
+// === EXISTING HELPER FUNCTIONS ===
+function createError(status, message, code = null) {
+    const err = new Error(message);
+    err.status = status;
+    if (code) err.code = code;
+    return err;
 }
-// --- END HELPER FUNCTION ---
 
+function normalizeSku(sku) {
+    if (!sku) return '';
+    return String(sku).trim();
+}
 
-// Read data from Google Sheets
+function checkAuth(req) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) return false;
+  const b64auth = authHeader.split(' ')[1];
+  const [login, password] = Buffer.from(b64auth, 'base64').toString().split(':');
+  return login === process.env.MURKIT_USER && password === process.env.MURKIT_PASS;
+}
+
+// readSheetData (EXISTING)
+// FIX: Enhanced for robustness against API errors and older JS environments 
+// to prevent "Cannot read properties of undefined (reading 'values')" error.
 async function readSheetData(sheets, spreadsheetId) {
-    const importRes = await sheets.spreadsheets.values.get({
-        spreadsheetId,
-        range: 'Import!A1:ZZ'
-    });
-    const controlRes = await sheets.spreadsheets.values.get({
-        spreadsheetId,
-        range: 'Feed Control List!A1:F'
-    });
+    let importRes, controlRes;
+    
+    try {
+        [importRes, controlRes] = await Promise.all([
+            sheets.spreadsheets.values.get({ spreadsheetId, range: 'Import!A1:ZZ' }),
+            sheets.spreadsheets.values.get({ spreadsheetId, range: 'Feed Control List!A1:F' }),
+        ]);
+    } catch (e) {
+        // If Promise.all fails due to Auth/API issues, we re-throw a more informative error
+        throw createError(500, `Failed to fetch data from Google Sheets: ${e.message}`, "SHEETS_API_ERROR");
+    }
+
+    // Safely access data using traditional checks (compatible with older Node.js runtimes)
+    // This prevents the "Cannot read properties of undefined" error if the response object is malformed
+    const importValues = (importRes && importRes.data && importRes.data.values) ? importRes.data.values : [];
+    const controlValues = (controlRes && controlRes.data && controlRes.data.values) ? controlRes.data.values : [];
+
     return { 
-        importValues: importRes.data.values || [], 
-        controlValues: controlRes.data.values || [] 
+        importValues: importValues, 
+        controlValues: controlValues 
     };
 }
 
-export default async function handler(req, res) {
-  const AUTH_USER = process.env.MONOMARKET_USER;
-  const AUTH_PASS = process.env.MONOMARKET_PASSWORD;
-  
-  // BASIC AUTH CHECK
-  if (AUTH_USER && AUTH_PASS) {
-      const authHeader = req.headers.authorization;
-      
-      if (!authHeader || !authHeader.startsWith('Basic ')) {
-          res.setHeader('WWW-Authenticate', 'Basic realm="Monomarket Private Area"');
-          return res.status(401).send('Unauthorized');
-      }
-
-      const b64Credentials = authHeader.split(' ')[1];
-      const credentials = Buffer.from(b64Credentials, 'base64').toString('utf-8');
-      const [user, pass] = credentials.split(':');
-
-      if (user !== AUTH_USER || pass !== AUTH_PASS) {
-          res.setHeader('WWW-Authenticate', 'Basic realm="Monomarket Private Area"');
-          return res.status(401).send('Invalid Credentials');
-      }
-  }
-
-  try {
-    const { sheets, spreadsheetId } = await ensureAuth();
-
-    const { importValues, controlValues } = await readSheetData(
-      sheets,
-      spreadsheetId
-    );
-
-    if (importValues.length < 2) {
-      return res.send('<h1>Таблиця пуста</h1>');
-    }
-
-    const headers = importValues[0];
-    const dataRows = importValues.slice(1);
-    
-    // Parse feed settings
+// getProductSkuMap (EXISTING)
+function getProductSkuMap(importValues, controlValues) {
+    const headers = importValues[0] || [];
+    const rows = importValues.slice(1);
     const controlHeaders = controlValues[0] || [];
     const controlRows = controlValues.slice(1);
 
     const idxImportField = controlHeaders.indexOf('Import field');
     const idxFeedName = controlHeaders.indexOf('Feed name');
 
-    const fieldMap = {}; 
+    let murkitCodeColRaw = '';
+    let wixSkuColRaw = '';
+
     controlRows.forEach(row => {
-      const imp = row[idxImportField];
-      const feedName = row[idxFeedName];
-      if (imp && feedName) {
-        fieldMap[String(feedName).trim()] = String(imp).trim();
-      }
+        const importField = row[idxImportField];
+        const feedName = row[idxFeedName];
+        if (feedName === 'code') murkitCodeColRaw = String(importField).trim();
+        if (feedName === 'id') wixSkuColRaw = String(importField).trim();
     });
-
-    // --- COLUMN INDEX DEFINITION ---
     
-    // 1. Find Name/Title column
-    let colName = -1;
-    const nameKeys = [fieldMap['name'], fieldMap['title'], 'Name', 'Title'].filter(Boolean);
-    for (const key of nameKeys) {
-      colName = headers.indexOf(key);
-      if (colName > -1) break;
+    const murkitCodeColIndex = headers.indexOf(murkitCodeColRaw);
+    const wixSkuColIndex = headers.indexOf(wixSkuColRaw);
+    
+    if (murkitCodeColIndex === -1 || wixSkuColIndex === -1) return {};
+
+    const map = {};
+    rows.forEach(row => {
+        const mCode = row[murkitCodeColIndex] ? String(row[murkitCodeColIndex]).trim() : '';
+        const wSku = row[wixSkuColIndex] ? String(row[wixSkuColIndex]).trim() : '';
+        if (mCode && wSku) map[mCode] = wSku;
+    });
+    return map;
+}
+
+const fmtPrice = (num) => parseFloat(num || 0).toFixed(2);
+
+function getFullName(nameObj) {
+    if (!nameObj) return { firstName: "Client", lastName: "" };
+    return {
+        firstName: String(nameObj.first || nameObj.firstName || "Client"),
+        lastName: String(nameObj.last || nameObj.lastName || "")
+    };
+}
+
+// --- FUNCTION: Mapping Wix Status to Murkit Response Format ---
+function mapWixOrderToMurkitResponse(wixOrder, fulfillments, externalId) {
+    const orderStatus = wixOrder.fulfillmentStatus || wixOrder.status;
+    const wixShippingLine = wixOrder.shippingInfo?.title || ''; 
+
+    let murkitStatus = 'accepted';
+    let murkitCancelStatus = null;
+    let shipmentType = null;
+    let shipment = null;
+    let ttn = null;
+
+    // 1. Cancellation processing
+    if (wixOrder.status === 'CANCELED') { 
+        murkitStatus = 'canceled';
+        murkitCancelStatus = 'canceled';
+    } 
+    
+    // 2. Fulfillment/Shipment status determination
+    else if (orderStatus === 'FULFILLED') {
+        murkitStatus = 'sent';
+    } 
+    else {
+        murkitStatus = 'accepted';
     }
 
-    // 2. Find SKU column
-    const colSku = headers.indexOf(fieldMap['sku'] || 'SKU'); 
-    
-    // 3. Find Price column
-    const colPrice = headers.indexOf(fieldMap['price'] || 'Price');
-
-    // 4. Find Code column (Product ID)
-    let colCode = -1;
-    if (fieldMap['code']) {
-        colCode = headers.indexOf(fieldMap['code']);
-    }
-    if (colCode === -1) {
-        colCode = headers.indexOf('code');
-    }
-    
-    // 5. Find Image columns dynamically (all fields mapped to image_link, image_1, etc.)
-    const imageCols = [];
-    const maxImages = 7;
-    
-    controlRows.forEach((row) => {
-        const headerName = row[idxImportField] ? String(row[idxImportField]).trim() : '';
-        const feedName = row[idxFeedName] ? String(row[idxFeedName]).trim() : '';
+    // 3. Process Fulfillments to get the TTN (Tracking Number)
+    if (Array.isArray(fulfillments) && fulfillments.length > 0) {
+        const fulfillmentWithTtn = fulfillments
+            // FIX: Search for fulfillment where trackingNumber is a non-empty string.
+            .find(f => f.trackingInfo && String(f.trackingInfo.trackingNumber || '').trim().length > 0);
         
-        // If Feed name starts with 'image_' (e.g., image_link, image_1, image_7)
-        if (feedName && feedName.startsWith('image_')) {
-            const colIndex = headers.indexOf(headerName);
-            // Ensure we found the header in the Import sheet
-            if (colIndex > -1) {
-                imageCols.push({ 
-                    index: colIndex, 
-                    feedName: feedName,
-                    sheetHeader: headerName 
+        if (fulfillmentWithTtn) {
+            // Assign the cleaned, non-empty TTN
+            ttn = String(fulfillmentWithTtn.trackingInfo.trackingNumber).trim();
+        }
+    }
+
+    // 4. Mapping shipping method and TTN (Only if status is 'sent' AND TTN is available)
+    const normalizedShippingLine = wixShippingLine.trim();
+    if (murkitStatus === 'sent' && ttn) {
+        shipmentType = WIX_TO_MURKIT_STATUS_MAPPING[normalizedShippingLine] || 'nova-post'; 
+        shipment = { ttn: ttn };
+    }
+    
+    // The Murkit response ID should be the Wix ID
+    return {
+        id: externalId, 
+        status: murkitStatus,
+        cancelStatus: murkitCancelStatus,
+        shipmentType: shipmentType,
+        shipment: shipment
+    };
+}
+
+
+// --- MAIN HANDLER ---
+export default async function handler(req, res) {
+    if (!checkAuth(req)) {
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
+    
+    const urlPathFull = req.url;
+    // FIX 1: Clean URL path from query parameters that Vercel might add (like ?path=...)
+    const urlPath = urlPathFull.split('?')[0]; 
+
+    // --- 1. PUT Cancel Order Endpoint ---
+    const cancelOrderPathMatch = urlPath.match(/\/orders\/([^/]+)\/cancel$/);
+    if (req.method === 'PUT' && cancelOrderPathMatch) {
+        // Wix Order ID
+        const wixOrderId = cancelOrderPathMatch[1]; 
+
+        try {
+            const cancelResult = await cancelWixOrderById(wixOrderId);
+
+            if (cancelResult.status === 404) {
+                 return res.status(404).json({ message: 'Order does not exist', code: 'NOT_FOUND' });
+            }
+            if (cancelResult.status === 409) {
+                let message;
+                if (cancelResult.code === 'ORDER_ALREADY_CANCELED') {
+                    message = 'Order already canceled';
+                } else if (cancelResult.code === 'CANNOT_CANCEL_ORDER') {
+                    message = 'Order already completed';
+                } else {
+                    message = 'Cannot cancel order';
+                }
+                 return res.status(409).json({ message: message, code: cancelResult.code });
+            }
+            
+            if (cancelResult.status === 200) {
+                // Search by Wix ID
+                const wixOrder = await findWixOrderById(wixOrderId);
+                const fulfillments = await getWixOrderFulfillments(wixOrderId);
+                
+                if (!wixOrder) {
+                     return res.status(500).json({ message: 'Internal server error: Order status not found after successful cancellation request', code: 'INTERNAL_ERROR' });
+                }
+                
+                // Murkit response ID should be Wix ID
+                const murkitResponse = mapWixOrderToMurkitResponse(wixOrder, fulfillments, wixOrderId);
+                return res.status(200).json(murkitResponse);
+            }
+
+        } catch (error) {
+            console.error('PUT Cancel Order Error:', error);
+            return res.status(500).json({ message: 'Internal server error while processing cancellation request', code: 'INTERNAL_ERROR' });
+        }
+    }
+    
+    // --- 2. GET Order Endpoint (Get status of a single order) ---
+    const singleOrderPathMatch = urlPath.match(/\/orders\/([^/]+)$/);
+    if (req.method === 'GET' && singleOrderPathMatch) {
+        // Wix Order ID
+        const wixOrderId = singleOrderPathMatch[1];
+
+        try {
+            // Search by Wix ID
+            const wixOrder = await findWixOrderById(wixOrderId);
+
+            if (!wixOrder) {
+                return res.status(404).json({ message: 'Order does not exist', code: 'NOT_FOUND' });
+            }
+            
+            const fulfillments = await getWixOrderFulfillments(wixOrderId);
+
+            // Murkit response ID should be Wix ID
+            const murkitResponse = mapWixOrderToMurkitResponse(wixOrder, fulfillments, wixOrderId);
+            return res.status(200).json(murkitResponse);
+
+        } catch (error) {
+            console.error('GET Order Error:', error);
+            return res.status(500).json({ message: 'Internal server error while processing order status', code: 'INTERNAL_ERROR' });
+        }
+    }
+
+    // --- 3. POST Order Batch Endpoint (Get status of multiple orders) ---
+    if (req.method === 'POST' && urlPath.includes('/orders/batch')) {
+        let orderIds; // Wix Order IDs
+        try {
+            orderIds = req.body && req.body.orders;
+            if (!Array.isArray(orderIds) || orderIds.length === 0) {
+                return res.status(400).json({ message: 'Invalid or empty "orders" array in request body', code: 'BAD_REQUEST' });
+            }
+        } catch (e) {
+            return res.status(400).json({ message: 'Invalid JSON body or missing "orders" array', code: 'BAD_REQUEST' });
+        }
+
+        const responses = [];
+        const errors = [];
+        
+        await Promise.all(orderIds.map(async (wixOrderId) => {
+            try {
+                // Search by Wix ID
+                const wixOrder = await findWixOrderById(wixOrderId);
+
+                if (!wixOrder) {
+                    errors.push({ id: wixOrderId, message: 'Order does not exist', code: 'NOT_FOUND' });
+                } else {
+                    const fulfillments = await getWixOrderFulfillments(wixOrderId);
+                    responses.push(mapWixOrderToMurkitResponse(wixOrder, fulfillments, wixOrderId));
+                }
+
+            } catch (error) {
+                console.error(`POST Order Batch Error for ID ${wixOrderId}:`, error);
+                errors.push({ id: wixOrderId, message: 'Internal server error while fetching order status', code: 'INTERNAL_ERROR' });
+            }
+        }));
+
+        return res.status(200).json({ orders: responses, errors: errors });
+    }
+
+    // --- 4. EXISTING POST LOGIC (Order Creation) ---
+    if (req.method === 'POST') {
+        
+        if (urlPath.includes('/orders/')) {
+            return res.status(404).json({ message: 'Not Found' });
+        }
+
+        try {
+            const murkitData = req.body;
+            
+            if (!murkitData.number) throw createError(400, 'Missing order number');
+            const murkitOrderId = String(murkitData.number);
+            console.log(`Processing Murkit Order #${murkitOrderId}`);
+
+            // === STEP 0: DEDUPLICATION ===
+            // SEARCH HERE BY Murkit ID
+            const existingOrder = await findWixOrderByExternalId(murkitOrderId);
+            if (existingOrder) {
+                console.log(`Order #${murkitOrderId} already exists. ID: ${existingOrder.id}`);
+                // Return Wix ID
+                return res.status(200).json({ "id": existingOrder.id });
+            }
+
+            // === ITEM VALIDATION ===
+            const murkitItems = murkitData.items || [];
+            if (murkitItems.length === 0) throw createError(400, 'No items in order');
+
+            const currency = "UAH";
+
+            // 1. Sheets
+            const sheets = await ensureAuth();
+            // This call is now more robust against API response issues
+            const { importValues, controlValues } = await readSheetData(sheets, process.env.SHEETS_ID);
+            const codeToSkuMap = getProductSkuMap(importValues, controlValues);
+            
+            // 2. Resolve SKUs
+            const wixSkusToFetch = [];
+            const itemsWithSku = murkitItems.map(item => {
+                const mCode = String(item.code).trim();
+                const wSku = codeToSkuMap[mCode] || mCode;
+                if(wSku) wixSkusToFetch.push(wSku);
+                return { ...item, wixSku: wSku };
+            });
+
+            if (wixSkusToFetch.length === 0) {
+                throw createError(400, 'No valid SKUs found to fetch from Wix');
+            }
+
+            // 3. Fetch Wix Products
+            const wixProducts = await getProductsBySkus(wixSkusToFetch);
+            
+            // === CREATE SKU MAP (Flattening) ===
+            const skuMap = {};
+
+            wixProducts.forEach(p => {
+                const pSku = normalizeSku(p.sku);
+                if (pSku) {
+                    skuMap[pSku] = { type: 'product', product: p, variantData: null };
+                }
+
+                if (p.variants && p.variants.length > 0) {
+                    p.variants.forEach(v => {
+                        const vSku = normalizeSku(v.variant?.sku);
+                        if (vSku) {
+                            skuMap[vSku] = { type: 'variant', product: p, variantData: v };
+                        }
+                    });
+                }
+            });
+
+            // 4. Line Items
+            const lineItems = [];
+            for (const item of itemsWithSku) {
+                const requestedQty = parseInt(item.quantity || 1, 10);
+                const targetSku = normalizeSku(item.wixSku);
+
+                const match = skuMap[targetSku];
+
+                if (!match) {
+                    throw createError(409, `Product with code ${item.code} not found`, "ITEM_NOT_FOUND");
+                }
+
+                const foundProduct = match.product;
+                const foundVariant = match.variantData; 
+
+                let catalogItemId = foundProduct.id; 
+                let variantId = null;
+                let stockData = foundProduct.stock;
+                let productName = foundProduct.name;
+                
+                let variantChoices = null; 
+                let descriptionLines = []; 
+                
+                if (foundVariant) {
+                    variantId = foundVariant.variant.id; 
+                    stockData = foundVariant.stock; 
+                    
+                    if (foundVariant.choices) {
+                        variantChoices = foundVariant.choices; 
+                        
+                        descriptionLines = Object.entries(variantChoices).map(([k, v]) => ({
+                            name: { original: k, translated: k },
+                            plainText: { original: v, translated: v },
+                            lineType: "PLAIN_TEXT"
+                        }));
+                    }
+                }
+
+                // === STOCK CHECK (409 ITEM_NOT_AVAILABLE) ===
+                if (stockData.inStock === false || (stockData.trackQuantity && (stockData.quantity < requestedQty))) {
+                     throw createError(409, `Product with code ${item.code} has not enough stock`, "ITEM_NOT_AVAILABLE");
+                }
+
+                let imageObj = null;
+                if (foundProduct.media && foundProduct.media.mainMedia && foundProduct.media.mainMedia.image) {
+                    imageObj = {
+                        url: foundProduct.media.mainMedia.image.url,
+                        width: foundProduct.media.mainMedia.image.width,
+                        height: foundProduct.media.mainMedia.image.height
+                    };
+                }
+
+                const catalogRef = {
+                    catalogItemId: catalogItemId,
+                    appId: WIX_STORES_APP_ID
+                };
+
+                if (variantId) {
+                    catalogRef.options = { variantId: variantId };
+                    if (variantChoices) {
+                        catalogRef.options.options = variantChoices;
+                    }
+                }
+
+                const lineItem = {
+                    quantity: requestedQty,
+                    catalogReference: catalogRef,
+                    productName: { original: productName },
+                    descriptionLines: descriptionLines, 
+                    itemType: { preset: "PHYSICAL" },
+                    physicalProperties: { sku: targetSku, shippable: true },
+                    price: { amount: fmtPrice(item.price) },
+                    taxDetails: { taxRate: "0", totalTax: { amount: "0.00", currency: currency } }
+                };
+
+                if (imageObj) {
+                    lineItem.image = imageObj;
+                }
+
+                lineItems.push(lineItem);
+            }
+
+            // 5. Order Data Preparation
+            const clientName = getFullName(murkitData.client?.name);
+            const recipientName = getFullName(murkitData.recipient?.name);
+            const phone = String(murkitData.client?.phone || murkitData.recipient?.phone || "").replace(/\D/g,'');
+            const email = murkitData.client?.email || "monomarket@mywoodmood.com";
+
+            const priceSummary = {
+                subtotal: { amount: fmtPrice(murkitData.sum), currency },
+                shipping: { amount: "0.00", currency }, 
+                tax: { amount: "0.00", currency },
+                discount: { amount: "0.00", currency },
+                total: { amount: fmtPrice(murkitData.sum), currency }
+            };
+
+            // === DELIVERY LOGIC ===
+            const d = murkitData.delivery || {}; 
+            const deliveryTypeKey = String(murkitData.deliveryType || 'nova-post').toLowerCase(); 
+            
+            const deliveryTitle = MURKIT_TO_WIX_CREATION_MAPPING[deliveryTypeKey] || "Delivery"; 
+
+            const npCity = String(d.settlement || d.city || d.settlementName || '').trim();
+            const street = String(d.address || '').trim();
+            const house = String(d.house || '').trim();
+            const flat = String(d.flat || '').trim();
+            const npWarehouse = String(d.warehouseNumber || '').trim();
+
+            let extendedFields = {};
+            let finalAddressLine = "unknown address";
+
+            if (deliveryTypeKey.includes('courier')) {
+                // COURIER
+                const addressParts = [];
+                if (street) addressParts.push(street);
+                if (house) addressParts.push(`буд. ${house}`);
+                if (flat) addressParts.push(`кв. ${flat}`);
+                
+                finalAddressLine = addressParts.length > 0
+                    ? addressParts.join(', ') 
+                    : `Address Delivery (${npCity})`;
+
+            } else {
+                // BRANCH/POSTAMAT (mapped in Wix as "НП Відділення")
+                if (npWarehouse) {
+                    finalAddressLine = `Nova Poshta №${npWarehouse}`;
+                    extendedFields = {
+                        "namespaces": {
+                            "_user_fields": {
+                                // Field used for branch/postamat number
+                                "nomer_viddilennya_poshtomatu_novoyi_poshti": npWarehouse
+                            }
+                        }
+                    };
+                } else {
+                    finalAddressLine = "Nova Poshta (number not specified)";
+                }
+            }
+
+            const shippingAddress = {
+                country: "UA",
+                city: npCity || "City",
+                addressLine: finalAddressLine, 
+                postalCode: "00000"
+            };
+
+            const wixOrderPayload = {
+                channelInfo: {
+                    type: "OTHER_PLATFORM",
+                    externalOrderId: murkitOrderId // Store Murkit ID here
+                },
+                status: "APPROVED",
+                lineItems: lineItems,
+                priceSummary: priceSummary,
+                billingInfo: {
+                    address: shippingAddress, 
+                    contactDetails: {
+                        firstName: clientName.firstName,
+                        lastName: clientName.lastName,
+                        phone: phone,
+                        email: email
+                    }
+                },
+                shippingInfo: {
+                    title: deliveryTitle,
+                    logistics: {
+                        shippingDestination: {
+                            address: shippingAddress,
+                            contactDetails: {
+                                firstName: recipientName.firstName,
+                                lastName: recipientName.lastName,
+                                phone: phone
+                            }
+                        }
+                    },
+                    cost: { price: { amount: "0.00", currency } }
+                },
+                buyerInfo: { email: email },
+                paymentStatus: (murkitData.payment_status === 'paid' || String(murkitData.paymentType || '').includes('paid')) ? "PAID" : "NOT_PAID",
+                currency: currency,
+                weightUnit: "KG",
+                taxIncludedInPrices: false,
+                ...(Object.keys(extendedFields).length > 0 ? { extendedFields } : {})
+            };
+
+            const createdOrder = await createWixOrder(wixOrderPayload);
+            
+            // RETURN OUR ID (WIX ID)
+            return res.status(201).json({ 
+                "id": createdOrder.order?.id
+            });
+
+        } catch (e) {
+            console.error('Murkit Webhook Error:', e.message);
+            
+            const status = e.status || 500;
+            
+            if (status === 409 && (e.code === 'ITEM_NOT_FOUND' || e.code === 'ITEM_NOT_AVAILABLE')) {
+                return res.status(409).json({
+                    message: e.message,
+                    code: e.code
                 });
             }
+
+            return res.status(status).json({ 
+                error: e.message 
+            });
         }
-    });
-
-    const finalImageCols = imageCols.slice(0, maxImages);
-    
-    // Fill remaining slots with empty placeholders
-    while (finalImageCols.length < maxImages) {
-        finalImageCols.push({ index: -1, feedName: 'empty', sheetHeader: 'N/A' });
     }
-    
-    // --- END COLUMN INDEX DEFINITION ---
 
-
-    if (colSku === -1) return res.status(500).send('<h1>Помилка: Не знайдено колонку SKU для синхронізації</h1>');
-
-    const skus = [];
-    const tableData = [];
-
-    dataRows.forEach(row => {
-      const sku = row[colSku] ? String(row[colSku]).trim() : '';
-      if (!sku) return;
-
-      skus.push(sku);
-      
-      const priceVal = colPrice > -1 ? row[colPrice] : '0';
-      const codeVal = colCode > -1 ? (row[colCode] || '') : ''; 
-      
-      const images = [];
-      const rawImages = []; 
-      
-      finalImageCols.forEach(imgCol => {
-          if (imgCol.index > -1) {
-              const rawUrl = row[imgCol.index] ? String(row[imgCol.index]).trim() : '';
-              rawImages.push(rawUrl);
-              
-              const modifiedUrl = modifyImageUrl(rawUrl);
-              images.push(modifiedUrl);
-          } else {
-              images.push(''); 
-              rawImages.push('');
-          }
-      });
-      
-      tableData.push({
-        sku: sku,
-        code: codeVal,
-        name: colName > -1 ? row[colName] : '(Без назви)',
-        priceRaw: priceVal,
-        price: cleanPrice(priceVal),
-        images: images,
-        rawImages: rawImages
-      });
-    });
-
-    // Request inventory from Wix
-    const inventory = await getInventoryBySkus(skus);
-    
-    const stockMap = {};
-    inventory.forEach(item => {
-      stockMap[String(item.sku).trim()] = item;
-    });
-
-    // PAGE HTML
-    let html = `
-    <html>
-      <head>
-        <title>Monomarket Control</title>
-        <meta charset="UTF-8">
-        <style>
-          body { font-family: sans-serif; padding: 20px; max-width: 1200px; margin: 0 auto; }
-          
-          /* Styles for order lookup block */
-          .order-lookup-box {
-            background-color: #f0f7ff;
-            border: 1px solid #cce5ff;
-            border-radius: 6px;
-            padding: 15px;
-            margin-bottom: 25px;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-          }
-          .order-lookup-box input {
-            padding: 8px;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-            width: 350px;
-            font-size: 14px;
-          }
-          .order-lookup-box button {
-            padding: 8px 15px;
-            background-color: #0070f3;
-            color: white;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 14px;
-          }
-          .order-lookup-box button:hover { background-color: #005bb5; }
-          .lookup-result { font-weight: bold; font-size: 16px; margin-left: 10px; }
-          .res-success { color: #0070f3; }
-          .res-error { color: #d93025; }
-
-          /* Table styles */
-          table { border-collapse: collapse; width: 100%; margin-top: 15px; }
-          th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-          th { background-color: #f2f2f2; }
-          
-          /* NEW IMAGE STYLES */
-          .img-cell {
-              padding: 0 !important; 
-              width: 40px; 
-              height: 40px; 
-              min-width: 40px;
-              min-height: 40px;
-              text-align: center; 
-              vertical-align: middle;
-              line-height: 0; 
-              border-left: 1px dashed #eee; 
-              position: relative; 
-          }
-          .img-cell img {
-              max-width: 40px;
-              max-height: 40px;
-              object-fit: contain; 
-              display: block;
-              margin: 0 auto;
-              /* УДАЛЕНО: transition: transform 0.2s; */
-              /* УДАЛЕНО: cursor: pointer; */
-          }
-          /* УДАЛЕНО: .img-cell img:hover { ... } */
-          
-          .img-placeholder {
-              display: block;
-              width: 100%;
-              height: 100%;
-              background-color: #f9f9f9; 
-              font-size: 8px;
-              line-height: 10px; 
-              padding: 5px 2px;
-              overflow: hidden; 
-              color: #888;
-          }
-          /* END NEW IMAGE STYLES */
-
-          .instock { background-color: #d4edda; color: #155724; font-weight: bold; }
-          .outstock { background-color: #f8d7da; color: #721c24; }
-          .warn { background-color: #fff3cd; color: #856404; }
-          h2 { margin-bottom: 10px; margin-top: 30px;}
-          .summary { margin-bottom: 20px; font-size: 14px; color: #666; }
-        </style>
-      </head>
-      <body>
-        
-        <h2>Перевірка номера замовлення</h2>
-        <div class="order-lookup-box">
-            <strong>Wix Order ID:</strong>
-            <input type="text" id="wixOrderId" placeholder="Вставте ID (наприклад: 89700e12-...)">
-            <button onclick="lookupOrder()">Отримати номер</button>
-            <span id="lookupResult" class="lookup-result"></span>
-        </div>
-
-        <script>
-            async function lookupOrder() {
-                const input = document.getElementById('wixOrderId');
-                const resultSpan = document.getElementById('lookupResult');
-                const id = input.value.trim();
-
-                if (!id) {
-                    resultSpan.textContent = "Введіть ID!";
-                    resultSpan.className = "lookup-result res-error";
-                    return;
-                }
-
-                resultSpan.textContent = "Пошук...";
-                resultSpan.className = "lookup-result";
-
-                try {
-                    // Используем путь /debug-order, согласно vercel.json
-                    const res = await fetch('/debug-order?id=' + encodeURIComponent(id));
-                    
-                    // 1. Check response status to avoid HTML parsing errors
-                    if (!res.ok) {
-                        const errorText = await res.text();
-                        // Output status and part of the response body
-                        resultSpan.textContent = \`Помилка сервера (\${res.status}): \${errorText.substring(0, 50)}...\`;
-                        resultSpan.className = "lookup-result res-error";
-                        return;
-                    }
-                    
-                    const data = await res.json();
-                    
-                    // 2. Correctly find the number in the structure {"order": {"number": "..."}}
-                    if (data.order && data.order.number) {
-                        resultSpan.textContent = "Номер замовлення: " + data.order.number;
-                        resultSpan.className = "lookup-result res-success";
-                    } else if (data.error) {
-                        resultSpan.textContent = "Помилка: " + data.error;
-                        resultSpan.className = "lookup-result res-error";
-                    } else {
-                        resultSpan.textContent = "Не знайдено або недійсний ID";
-                        resultSpan.className = "lookup-result res-error";
-                    }
-                } catch (e) {
-                    // Handle network errors or JSON parsing errors
-                    resultSpan.textContent = "Помилка запиту (JS): " + e.message;
-                    resultSpan.className = "lookup-result res-error";
-                }
-            }
-        </script>
-
-        <h2>Monomarket Feed Table</h2>
-        
-        <div class="summary">
-          Усього товарів у таблиці: ${tableData.length} <br>
-          Зібрано залишків з Wix: ${inventory.length}
-        </div>
-
-        <table>
-          <thead>
-            <tr>
-              <th>Product ID</th>
-              <th title="Фото 1" class="img-cell">Ф1</th>
-              <th title="Фото 2" class="img-cell">Ф2</th>
-              <th title="Фото 3" class="img-cell">Ф3</th>
-              <th title="Фото 4" class="img-cell">Ф4</th>
-              <th title="Фото 5" class="img-cell">Ф5</th>
-              <th title="Фото 6" class="img-cell">Ф6</th>
-              <th title="Фото 7" class="img-cell">Ф7</th>
-              <th>Артикул (SKU)</th>
-              <th>Назва (Sheet)</th>
-              <th>Ціна (Sheet)</th>
-              <th>Наявність (Wix)</th>
-              <th>К-сть (Wix)</th>
-            </tr>
-          </thead>
-          <tbody>
-    `;
-
-    tableData.forEach(item => {
-      const wixItem = stockMap[item.sku];
-      
-      let stockClass = '';
-      let stockText = '';
-      let qtyText = '-';
-
-      if (!wixItem) {
-        stockClass = 'warn'; 
-        stockText = 'Не знайдено в Wix';
-      } else if (wixItem.inStock) {
-        stockClass = 'instock'; 
-        stockText = 'В НАЯВНОСТІ';
-        qtyText = wixItem.quantity;
-      } else {
-        stockClass = 'outstock'; 
-        stockText = 'Немає в наявності';
-        qtyText = wixItem.quantity;
-      }
-
-      html += `
-        <tr>
-          <td>${item.code}</td>
-          
-          ${item.images.map((url, index) => {
-              const rawContent = item.rawImages[index] || ''; 
-              const mappedHeader = finalImageCols[index].sheetHeader;
-              let debugText;
-              
-              if (url) {
-                  // If we have a valid URL, no debug text needed
-                  debugText = ''; 
-              } else if (rawContent === '') {
-                  // Content is empty
-                  debugText = `ПУСТО: ${mappedHeader}`;
-              } else if (rawContent.length > 20) {
-                  // Content is long, but not an image URL (e.g., formula result)
-                  debugText = `КОНТЕНТ (${rawContent.substring(0, 10)}...)`;
-              } else {
-                  // Short content (e.g., 'CellImage' or error text)
-                  debugText = rawContent;
-              }
-
-              return `
-                <td class="img-cell" title="Фото ${index + 1} | Header: ${mappedHeader} | Raw: ${rawContent}">
-                  ${url 
-                    ? `<img src="${url}" alt="Фото ${index + 1}" loading="lazy">` 
-                    : `<span class="img-placeholder">${debugText}</span>`
-                  }
-                </td>
-              `;
-          }).join('')}
-          <td>${item.sku}</td>
-          <td>${item.name}</td>
-          <td>${item.price.toFixed(2)} ₴</td>
-          <td class="${stockClass}">${stockText}</td>
-          <td>${qtyText}</td>
-        </tr>
-      `;
-    });
-
-    html += `
-          </tbody>
-        </table>
-      </body>
-    </html>
-    `;
-
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.status(200).send(html);
-
-  } catch (e) {
-    res.status(500).send(`<h1>Помилка</h1><pre>${e.message}\n${e.stack}</pre>`);
-  }
+    // 5. Handling unknown routes/methods
+    return res.status(404).json({ message: 'Not Found' });
 }
