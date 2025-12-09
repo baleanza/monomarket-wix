@@ -1,7 +1,7 @@
 {
   "name": "monomarket-murkit-feed",
   "version": "1.0.0",
-  "description": "Vercel serverless XML offers feed generator from Google Sheets (Murkit format)",
+  "description": "Vercel serverless XML offers feed generator from Google Sheets",
   "main": "api/monomarket.js",
   "type": "module",
   "scripts": {
