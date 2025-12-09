@@ -1,4 +1,4 @@
-# Monomarket/Murkit ↔ Wix Connector
+# Monomarket ↔ Wix Connector
 
 ## 🌟 Огляд проєкту
 
