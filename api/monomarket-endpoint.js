@@ -2,11 +2,9 @@ import {
     createWixOrder, 
     getProductsBySkus, 
     findWixOrderByExternalId, 
-    // New functions for GET/PUT/POST batch
     findWixOrderById, 
     getWixOrderFulfillments, 
     cancelWixOrderById,
-    // Restored: adjustInventory was present in the old working code
     adjustInventory 
 } from '../lib/wixClient.js';
 import { ensureAuth } from '../lib/sheetsClient.js'; 
