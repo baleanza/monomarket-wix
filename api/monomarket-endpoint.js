@@ -5,19 +5,20 @@ import {
     findWixOrderById, 
     getWixOrderFulfillments, 
     cancelWixOrderById,
-    adjustInventory 
+    adjustInventory,
+    getWixOrderFulfillmentsBatch
 } from '../lib/wixClient.js';
 import { ensureAuth } from '../lib/sheetsClient.js'; 
 
 const WIX_STORES_APP_ID = "215238eb-22a5-4c36-9e7b-e7c08025e04e"; 
 
-// === НАЛАШТУВАННЯ НАЗВ ДОСТАВКИ (для создания заказа) ===
+// === НАЛАШТУВАННЯ НАЗВ ДОСТАВКИ (для створення замовлення) ===
 const SHIPPING_TITLES = {
     BRANCH: "НП Відділення",  
     COURIER: "НП Кур'єр"
 };
 
-// === MAPPING FOR STATUS RETRIEVAL (для получения статуса) ===
+// === MAPPING FOR STATUS RETRIEVAL (для отримання статуса) ===
 const WIX_TO_MURKIT_STATUS_MAPPING = {
     "НП Відділення": "nova-post", 
     "НП Кур'єр": "courier-nova-post",
@@ -44,7 +45,6 @@ function checkAuth(req) {
   return login === process.env.MURKIT_USER && password === process.env.MURKIT_PASS;
 }
 
-// readSheetData (ФИНАЛЬНЫЙ FIX: Используем ТОЛЬКО последовательное чтение с усиленными проверками)
 async function readSheetData(sheets, spreadsheetId) {
     let importRes, controlRes;
     
@@ -123,7 +123,7 @@ function getFullName(nameObj) {
     };
 }
 
-// --- FUNCTION: Mapping Wix Status to Murkit Response Format (Для новых функций) ---
+// --- FUNCTION: Mapping Wix Status to Murkit Response Format ---
 function mapWixOrderToMurkitResponse(wixOrder, fulfillments, externalId) {
     const orderStatus = wixOrder.fulfillmentStatus || wixOrder.status;
     const wixShippingLine = wixOrder.shippingInfo?.title || ''; 
@@ -245,7 +245,7 @@ export default async function handler(req, res) {
         }
     }
 
-    // --- 3. POST Order Batch Endpoint ---
+    // --- 3. POST Order Batch Endpoint (ОБНОВЛЕННАЯ ЛОГИКА) ---
     if (req.method === 'POST' && urlPath.includes('/orders/batch')) {
         let orderIds; 
         try {
@@ -257,26 +257,50 @@ export default async function handler(req, res) {
             return res.status(400).json({ message: 'Invalid JSON body or missing "orders" array', code: 'BAD_REQUEST' });
         }
 
-        const responses = [];
-        const errors = [];
-        
-        // Simplified batch logic (no Sheets dependency here)
-        await Promise.all(orderIds.map(async (wixOrderId) => {
+        // 1. Fetch all Orders in parallel
+        const orderFetchResults = await Promise.all(orderIds.map(async (wixOrderId) => {
             try {
                 const wixOrder = await findWixOrderById(wixOrderId);
-
-                if (!wixOrder) {
-                    errors.push({ id: wixOrderId, message: 'Order does not exist', code: 'NOT_FOUND' });
-                } else {
-                    const fulfillments = await getWixOrderFulfillments(wixOrderId);
-                    responses.push(mapWixOrderToMurkitResponse(wixOrder, fulfillments, wixOrderId));
-                }
-
+                return { id: wixOrderId, order: wixOrder };
             } catch (error) {
-                console.error(`POST Order Batch Error for ID ${wixOrderId}:`, error);
-                errors.push({ id: wixOrderId, message: 'Internal server error while fetching order status', code: 'INTERNAL_ERROR' });
+                return { id: wixOrderId, error: { message: 'Internal server error while fetching order status', code: 'INTERNAL_ERROR' } };
             }
         }));
+
+        const ordersToProcess = orderFetchResults.filter(r => r.order);
+        // Collect errors from order fetching (e.g., 404, network error)
+        const errors = orderFetchResults.filter(r => !r.order).map(r => r.error || { id: r.id, message: 'Order not found', code: 'NOT_FOUND' });
+        
+        const idsToBatch = ordersToProcess.map(r => r.id);
+        
+        let batchFulfillmentMap = new Map();
+        
+        // 2. Fetch all Fulfillments in one batch call
+        if (idsToBatch.length > 0) {
+            try {
+                // ИСПОЛЬЗУЕМ ЭФФЕКТИВНЫЙ БАТЧ-ЗАПРОС
+                const batchResponse = await getWixOrderFulfillmentsBatch(idsToBatch);
+                
+                // Map fulfillments back to Order IDs
+                if (Array.isArray(batchResponse)) {
+                    batchResponse.forEach(orderFulfillmentData => {
+                        if (orderFulfillmentData.orderId && Array.isArray(orderFulfillmentData.fulfillments)) {
+                            // Map: orderId -> [fulfillment1, fulfillment2, ...]
+                            batchFulfillmentMap.set(orderFulfillmentData.orderId, orderFulfillmentData.fulfillments);
+                        }
+                    });
+                }
+            } catch (e) {
+                console.error('Batch Fulfillment Fetch Error:', e);
+                // Errors in batch fulfillment do not stop the process, we continue returning statuses without shipment info
+            }
+        }
+        
+        // 3. Map orders and fulfillments to Murkit Response format
+        const responses = ordersToProcess.map(result => {
+            const fulfillmentsForOrder = batchFulfillmentMap.get(result.id) || [];
+            return mapWixOrderToMurkitResponse(result.order, fulfillmentsForOrder, result.id);
+        });
 
         return res.status(200).json({ orders: responses, errors: errors });
     }
@@ -311,7 +335,7 @@ export default async function handler(req, res) {
 
             // 1. Sheets (FIXED implementation of readSheetData is used here)
             const { sheets, spreadsheetId } = await ensureAuth(); 
-            const { importValues, controlValues } = await readSheetData(sheets, spreadsheetId);
+            const { importValues, controlValues } = await readSheetData(sheets, process.env.SHEETS_ID);
             const codeToSkuMap = getProductSkuMap(importValues, controlValues);
             
             // 2. Resolve SKUs
