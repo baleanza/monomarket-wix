@@ -4,14 +4,17 @@
     { "src": "api/*.js", "use": "@vercel/node" }
   ],
   "routes": [
-    { "src": "/", "dest": "/api/monomarket.js" }, 
-    
+    { "src": "/", "dest": "/api/monomarket.js" },
     { "src": "/monomarket", "dest": "/api/monomarket.js" },
     
     { "src": "/monomarket-offers", "dest": "/api/monomarket-offers.js" },
     { "src": "/monomarket-stock", "dest": "/api/monomarket-stock.js" },
-    { "src": "/murkit-webhook", "dest": "/api/murkit-webhook.js" },
+    
     { "src": "/debug-wix", "dest": "/api/debug-wix.js" },
     { "src": "/debug-order", "dest": "/api/debug-order.js" }
+  ],
+  "rewrites": [
+    { "source": "/monomarket-endpoint", "destination": "/api/monomarket-endpoint.js" },
+    { "source": "/monomarket-endpoint/orders/:path*", "destination": "/api/monomarket-endpoint.js" }
   ]
 }
