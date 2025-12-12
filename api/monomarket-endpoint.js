@@ -500,7 +500,7 @@ export default async function handler(req, res) {
             };
 
             const d = murkitData.delivery || {}; 
-            const deliveryType = String(murkitData.deliveryType || '');
+            const deliveryType = String(murkitData.deliveryType || '').toLowerCase(); // toLowerCase для надійної перевірки
             
             const npCity = String(d.settlement || d.city || d.settlementName || '').trim();
             const street = String(d.address || '').trim();
@@ -524,11 +524,27 @@ export default async function handler(req, res) {
                     ? addressParts.join(', ') 
                     : `Адресна доставка (${npCity})`; // Address delivery
 
-            } else {
+            } else if (deliveryType.includes('postomat')) { // НОВА ЛОГІКА ДЛЯ ПОШТОМАТУ
+                deliveryTitle = SHIPPING_TITLES.POSTOMAT; 
+                
+                if (npWarehouse) {
+                    finalAddressLine = `Нова Пошта Поштомат №${npWarehouse}`; // Nova Poshta Postomat
+                    extendedFields = {
+                        "namespaces": {
+                            "_user_fields": {
+                                "nomer_viddilennya_poshtomatu_novoyi_poshti": npWarehouse // Nova Poshta branch/postamat number
+                            }
+                        }
+                    };
+                } else {
+                    finalAddressLine = "Нова Пошта Поштомат (номер не указан)"; // Nova Poshta (number not specified)
+                }
+            
+            } else { // Обробка "НП Відділення" та інших (BRANCH)
                 deliveryTitle = SHIPPING_TITLES.BRANCH; 
                 
                 if (npWarehouse) {
-                    finalAddressLine = `Нова Пошта №${npWarehouse}`; // Nova Poshta
+                    finalAddressLine = `Нова Пошта №${npWarehouse}`; // Nova Poshta Branch
                     extendedFields = {
                         "namespaces": {
                             "_user_fields": {
