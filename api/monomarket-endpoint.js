@@ -6,8 +6,8 @@ import {
     getWixOrderFulfillments, 
     cancelWixOrderById,
     adjustInventory,
-    getWixOrderFulfillmentsBatch
-    // Import updateWixOrderStatus here once added to lib/wixClient.js
+    getWixOrderFulfillmentsBatch,
+    updateWixOrderStatus // <--- ДОДАНО
 } from '../lib/wixClient.js';
 import { ensureAuth } from '../lib/sheetsClient.js'; 
 
@@ -207,20 +207,14 @@ export default async function handler(req, res) {
             if (isSent) {
                 // Case 1: Заказ уже отправлен (FULFILLED). 
                 
-                // 1. Обновляем статус в Wix на REJECTED (или другой, который используете для возвратов)
-                // !!! ВАЖНО: Требуется функция updateWixOrderStatus в lib/wixClient.js
-                // !!! ЕЕ НЕТ в предоставленных файлах. Разкомментируйте, когда добавите!
-                /*
+                // 1. Обновляем статус в Wix на REJECTED 
                 try {
-                    await updateWixOrderStatus(wixOrderId, "REJECTED"); 
+                    await updateWixOrderStatus(wixOrderId, "REJECTED"); // <--- ТЕПЕР РОЗКОМЕНТОВАНО
                     console.log(`Order ${wixOrderId} FULFILLED. Wix status successfully set to REJECTED.`);
                 } catch (updateError) {
-                    console.error(`Wix status update FAILED for order ${wixOrderId}:`, updateError);
-                    // Продолжаем, т.к. приоритет — ответ Murkit
+                    // Логируем ошибку, но продолжаем, так как приоритет — ответ Murkit
+                    console.error(`Wix status update FAILED for order ${wixOrderId}:`, updateError.message);
                 }
-                */
-                console.log(`Order ${wixOrderId} FULFILLED. Wix status update to REJECTED pending new function in wixClient.js.`);
-
 
                 // 2. Возвращаем 'canceling' статус Murkit.
                 fulfillments = await getWixOrderFulfillments(wixOrderId); 
