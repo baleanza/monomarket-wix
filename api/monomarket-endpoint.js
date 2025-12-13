@@ -8,8 +8,9 @@ import {
     adjustInventory,
     getWixOrderFulfillmentsBatch,
     updateWixOrderDetails,
+    createWixRefund, // Используем этот, который теперь ищет paymentId и делает Refund
     addExternalPayment,
-    createExternalRefund // <-- ИМПОРТИРУЕМ НОВУЮ ФУНКЦИЮ
+    getWixPaymentDetails // Используем для поиска ID
 } from '../lib/wixClient.js';
 import { ensureAuth } from '../lib/sheetsClient.js'; 
 
@@ -191,21 +192,41 @@ export default async function handler(req, res) {
                 try {
                     const totalAmount = currentWixOrder.priceSummary?.total?.amount || "0";
                     const currency = currentWixOrder.priceSummary?.total?.currency || "UAH";
+                    let refundSuccess = false;
 
-                    // === НОВЫЙ ФЛОУ: ПРИНУДИТЕЛЬНЫЙ REFUND ===
-                    await createExternalRefund(wixOrderId, totalAmount, currency);
+                    // 1. Ищем ID оплаты, которую мы создали
+                    console.log(`[DEBUG] Attempting to find payment details for order: ${wixOrderId}`);
+                    const payment = await getWixPaymentDetails(wixOrderId);
                     
-                    // Обновляем заметку
-                    await updateWixOrderDetails(wixOrderId, {
-                         buyerNote: "⚠️ КЛІЄНТ ПОПРОСИВ ПОВЕРНЕННЯ / FORCED REFUND TRANSACTION"
-                    });
+                    if (payment && payment.id) {
+                        const paymentId = payment.id;
+                        console.log(`[DEBUG] Payment found: ${paymentId}. Attempting Refund.`);
+                        
+                        // 2. Делаем штатный Refund
+                        const refundResult = await createWixRefund(wixOrderId, paymentId, totalAmount, currency);
+
+                        if (refundResult) {
+                           refundSuccess = true;
+                           console.log(`Order ${wixOrderId} FULFILLED. Payment status set to REFUNDED.`);
+                           
+                           await updateWixOrderDetails(wixOrderId, {
+                                buyerNote: "⚠️ КЛІЄНТ ПОПРОСИВ ПОВЕРНЕННЯ / REFUND SUCCESS"
+                           });
+                        }
+
+                    } 
                     
-                    console.log(`Order ${wixOrderId} FULFILLED. Forced REFUND transaction created. Payment status should now update.`);
+                    if (!refundSuccess) {
+                         console.warn(`[DEBUG] Payment or Refund failed for order ${wixOrderId}. Skipping refund and logging note.`);
+                         await updateWixOrderDetails(wixOrderId, {
+                              buyerNote: "⚠️ REFUND REQUIRED (AUTO-REFUND FAILED: NO PAYMENT ID or API ERROR)"
+                         });
+                    }
 
                 } catch (updateError) {
                     console.error(`Wix refund logic failed for ${wixOrderId}:`, updateError.message);
                     await updateWixOrderDetails(wixOrderId, {
-                         buyerNote: "⚠️ REFUND REQUIRED (AUTO-REFUND FAILED)"
+                         buyerNote: `⚠️ REFUND REQUIRED (AUTO-REFUND CRASHED: ${updateError.message})`
                     });
                 }
 
