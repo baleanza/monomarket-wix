@@ -9,8 +9,7 @@ import {
     getWixOrderFulfillmentsBatch,
     updateWixOrderDetails,
     addExternalPayment,
-    getWixPaymentDetails, // Новая функция
-    voidWixPayment        // Новая функция
+    createExternalRefund // <-- ИМПОРТИРУЕМ НОВУЮ ФУНКЦИЮ
 } from '../lib/wixClient.js';
 import { ensureAuth } from '../lib/sheetsClient.js'; 
 
@@ -177,8 +176,8 @@ export default async function handler(req, res) {
 
             if (currentWixOrder.status === 'CANCELED') {
                 const batchResponse = await getWixOrderFulfillmentsBatch([wixOrderId]);
-                const orderFulf = batchResponse.find(o => o.orderId === wixOrderId);
-                fulfillments = orderFulf ? orderFulf.fulfillments : [];
+                const orderFulfillmentData = batchResponse[0];
+                fulfillments = (orderFulfillmentData && orderFulfillmentData.fulfillments) ? orderFulfillmentData.fulfillments : [];
                 
                 murkitResponse = mapWixOrderToMurkitResponse(currentWixOrder, fulfillments, wixOrderId);
                 murkitResponse.status = 'canceled';
@@ -190,36 +189,30 @@ export default async function handler(req, res) {
             if (isSent) {
                 // FULFILLED LOGIC
                 try {
-                    console.log(`[DEBUG] Fetching payment details for order: ${wixOrderId} (ecom/v1)`);
-                    const payment = await getWixPaymentDetails(wixOrderId);
+                    const totalAmount = currentWixOrder.priceSummary?.total?.amount || "0";
+                    const currency = currentWixOrder.priceSummary?.total?.currency || "UAH";
 
-                    if (payment && payment.id) {
-                        console.log(`[DEBUG] Payment found: ${payment.id}. Status: ${payment.status}`);
-                        
-                        // Если статус уже не APPROVE, то, возможно, не надо ничего делать
-                        // Но мы попробуем VOID
-                        await voidWixPayment(payment.id, wixOrderId);
-
-                        // Также обновляем заметку
-                        await updateWixOrderDetails(wixOrderId, {
-                             buyerNote: "⚠️ КЛІЄНТ ПОПРОСИВ ПОВЕРНЕННЯ / VOID PAYMENT"
-                        });
-                        console.log(`Order ${wixOrderId} FULFILLED. Payment VOIDED.`);
-                    } else {
-                         console.warn(`[DEBUG] No payment info found in ecom/v1. Cannot VOID.`);
-                         await updateWixOrderDetails(wixOrderId, {
-                             buyerNote: "⚠️ REFUND REQUIRED (AUTO-VOID FAILED: NO PAYMENT FOUND)"
-                        });
-                    }
+                    // === НОВЫЙ ФЛОУ: ПРИНУДИТЕЛЬНЫЙ REFUND ===
+                    await createExternalRefund(wixOrderId, totalAmount, currency);
+                    
+                    // Обновляем заметку
+                    await updateWixOrderDetails(wixOrderId, {
+                         buyerNote: "⚠️ КЛІЄНТ ПОПРОСИВ ПОВЕРНЕННЯ / FORCED REFUND TRANSACTION"
+                    });
+                    
+                    console.log(`Order ${wixOrderId} FULFILLED. Forced REFUND transaction created. Payment status should now update.`);
 
                 } catch (updateError) {
-                    console.error(`Wix void/refund logic failed for ${wixOrderId}:`, updateError.message);
+                    console.error(`Wix refund logic failed for ${wixOrderId}:`, updateError.message);
+                    await updateWixOrderDetails(wixOrderId, {
+                         buyerNote: "⚠️ REFUND REQUIRED (AUTO-REFUND FAILED)"
+                    });
                 }
 
-                // Получаем TTN
+                // Возвращаем Murkit статус 'canceling', не меняя статус заказа.
                 const batchResponse = await getWixOrderFulfillmentsBatch([wixOrderId]);
-                const orderFulf = batchResponse.find(o => o.orderId === wixOrderId);
-                fulfillments = orderFulf ? orderFulf.fulfillments : [];
+                const orderFulfillmentData = batchResponse[0];
+                fulfillments = (orderFulfillmentData && orderFulfillmentData.fulfillments) ? orderFulfillmentData.fulfillments : [];
                 
                 const mappedResponse = mapWixOrderToMurkitResponse(currentWixOrder, fulfillments, wixOrderId);
                 
@@ -242,10 +235,11 @@ export default async function handler(req, res) {
                 if (cancelResult.status === 200) {
                     const wixOrder = await findWixOrderById(wixOrderId);
                     const batchResponse = await getWixOrderFulfillmentsBatch([wixOrderId]);
-                    const orderFulf = batchResponse.find(o => o.orderId === wixOrderId);
-                    fulfillments = orderFulf ? orderFulf.fulfillments : [];
+                    const orderFulfillmentData = batchResponse[0];
+                    fulfillments = (orderFulfillmentData && orderFulfillmentData.fulfillments) ? orderFulfillmentData.fulfillments : [];
 
                     murkitResponse = mapWixOrderToMurkitResponse(wixOrder, fulfillments, wixOrderId);
+                    
                     murkitResponse.status = 'canceled';
                     murkitResponse.cancelStatus = 'canceled';
                     
@@ -260,8 +254,6 @@ export default async function handler(req, res) {
         }
     }
 
-    // ... Остальной код GET/POST/POST ...
-    // ... Оставляем без изменений ...
     // --- 2. GET Order Endpoint ---
     const singleOrderPathMatch = urlPath.match(/\/orders\/([^/]+)$/);
     if (req.method === 'GET' && singleOrderPathMatch) {
@@ -271,8 +263,8 @@ export default async function handler(req, res) {
             if (!wixOrder) return res.status(404).json({ message: 'Order does not exist', code: 'NOT_FOUND' });
             
             const batchResponse = await getWixOrderFulfillmentsBatch([wixOrderId]);
-            const orderFulf = batchResponse.find(o => o.orderId === wixOrderId);
-            const fulfillments = orderFulf ? orderFulf.fulfillments : [];
+            const orderFulfillmentData = batchResponse[0];
+            const fulfillments = (orderFulfillmentData && orderFulfillmentData.fulfillments) ? orderFulfillmentData.fulfillments : [];
 
             const murkitResponse = mapWixOrderToMurkitResponse(wixOrder, fulfillments, wixOrderId);
             if (wixOrder.status === 'CANCELED') {
