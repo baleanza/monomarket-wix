@@ -7,7 +7,9 @@ import {
     cancelWixOrderById,
     adjustInventory,
     getWixOrderFulfillmentsBatch,
-    updateWixOrderStatus // <--- ДОДАНО
+    updateWixOrderNote,     // Імпорт
+    getWixOrderTransactions, // Імпорт
+    createWixRefund         // Імпорт
 } from '../lib/wixClient.js';
 import { ensureAuth } from '../lib/sheetsClient.js'; 
 
@@ -207,13 +209,45 @@ export default async function handler(req, res) {
             if (isSent) {
                 // Case 1: Заказ уже отправлен (FULFILLED). 
                 
-                // 1. Обновляем статус в Wix на REJECTED 
+                // --- СТРАТЕГІЯ: ЗМІНА СТАТУСУ ОПЛАТИ НА REFUNDED ---
                 try {
-                    await updateWixOrderStatus(wixOrderId, "REJECTED"); // <--- ТЕПЕР РОЗКОМЕНТОВАНО
-                    console.log(`Order ${wixOrderId} FULFILLED. Wix status successfully set to REJECTED.`);
+                    // 1. Оновлюємо Примітку (на всяк випадок)
+                    await updateWixOrderNote(wixOrderId, "⚠️ REFUNDED / CANCELED by MONOMARKET");
+                    
+                    // 2. Отримуємо транзакції, щоб знайти ID оплати
+                    const transactions = await getWixOrderTransactions(wixOrderId);
+                    
+                    // Знаходимо першу успішну оплату (Charge/Payment)
+                    // Зазвичай тип 'ORDER_PLACED' або просто paymentId є у транзакції.
+                    // Структура транзакцій може відрізнятися, але зазвичай є масив payments
+                    // Або transactions[0].paymentId
+                    
+                    let paymentIdToRefund = null;
+                    
+                    // Пробуємо знайти paymentId
+                    if (transactions && transactions.length > 0) {
+                        // Шукаємо транзакцію з type: 'CHARGE' або де є amount
+                         const chargeTx = transactions.find(t => t.type === 'CHARGE' || (t.amount && t.amount > 0));
+                         if (chargeTx) {
+                             paymentIdToRefund = chargeTx.paymentId || chargeTx._id; // _id часто є ID транзакції
+                         } else {
+                             // Беремо просто першу
+                             paymentIdToRefund = transactions[0].paymentId || transactions[0]._id;
+                         }
+                    }
+
+                    if (paymentIdToRefund) {
+                        const totalAmount = currentWixOrder.priceSummary?.total?.amount || "0";
+                        const currency = currentWixOrder.priceSummary?.total?.currency || "UAH";
+                        
+                        await createWixRefund(wixOrderId, paymentIdToRefund, totalAmount, currency);
+                        console.log(`Order ${wixOrderId} FULFILLED. Payment marked as REFUNDED.`);
+                    } else {
+                         console.warn(`Could not find payment ID to refund for order ${wixOrderId}`);
+                    }
+
                 } catch (updateError) {
-                    // Логируем ошибку, но продолжаем, так как приоритет — ответ Murkit
-                    console.error(`Wix status update FAILED for order ${wixOrderId}:`, updateError.message);
+                    console.error(`Wix refund/update FAILED for order ${wixOrderId}:`, updateError.message);
                 }
 
                 // 2. Возвращаем 'canceling' статус Murkit.
