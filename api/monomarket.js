@@ -1,8 +1,14 @@
 import { ensureAuth, cleanPrice } from '../lib/sheetsClient.js'; 
-import { getInventoryBySkus, findWixOrderById } from '../lib/wixClient.js'; // ADDED findWixOrderById
+// Оновлено: імпортуємо обидві функції пошуку
+import { getInventoryBySkus, findWixOrderById, findWixOrderByExternalId } from '../lib/wixClient.js'; 
 // Assuming checkAuth is defined in monomarket-endpoint.js and exported/available
 import { checkAuth } from './monomarket-endpoint.js'; 
 
+// Нова допоміжна функція для перевірки формату UUID
+function isWixUuid(id) {
+    // Базовий регулярний вираз для перевірки формату UUID
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id.trim());
+}
 
 // --- HELPER FUNCTION FOR CLOUDINARY TRANSFORMATION ---
 function modifyImageUrl(originalUrl) {
@@ -61,7 +67,6 @@ export default async function handler(req, res) {
     const AUTH_PASS = process.env.MONOMARKET_PASSWORD;
     
     // --- TEMPORARILY REPLICATE BASIC AUTH CHECK ---
-    // Since this file requires checkAuth, we replicate the logic needed for the HTML page to work
     let authPassed = true;
     if (AUTH_USER && AUTH_PASS) {
         const authHeader = req.headers.authorization;
@@ -83,39 +88,54 @@ export default async function handler(req, res) {
     }
     // --- END BASIC AUTH REPLICATION ---
 
-    // --- FIX: HANDLE JSON LOOKUP QUERY PARAMETER (for AJAX calls from the same page) ---
+    // --- UPDATED: HANDLE JSON LOOKUP QUERY PARAMETER (Dual Search Logic) ---
     const lookupId = req.query.id || req.query.orderId;
     if (req.method === 'GET' && lookupId) {
         try {
-            // findWixOrderById використовує Wix UUID. Якщо ви хочете шукати за Wix Order Number (#1001), 
-            // потрібна додаткова логіка. Наразі залишаємо пошук за ID, оскільки це найнадійніше API.
-            const wixOrder = await findWixOrderById(lookupId);
+            const trimmedId = lookupId.trim();
+            let wixOrder = null;
+
+            const isUuid = isWixUuid(trimmedId);
+
+            if (isUuid) {
+                // Сценарій 1: Введене значення схоже на Wix ID (UUID)
+                wixOrder = await findWixOrderById(trimmedId);
+                if (!wixOrder) {
+                    // Резервний пошук: спробувати як Murkit Number
+                    wixOrder = await findWixOrderByExternalId(trimmedId);
+                }
+            } else {
+                // Сценарій 2: Введене значення НЕ схоже на Wix ID (імовірно Murkit ID)
+                wixOrder = await findWixOrderByExternalId(trimmedId);
+                if (!wixOrder) {
+                    // Резервний пошук: спробувати як Wix ID (UUID)
+                    wixOrder = await findWixOrderById(trimmedId);
+                }
+            }
+
 
             if (!wixOrder) {
-                return res.status(404).json({ error: 'Order not found in Wix.' });
+                return res.status(404).json({ error: 'Order not found in Wix by ID or Murkit Number.' });
             }
 
-            const externalId = wixOrder.channelInfo?.externalOrderId;
-            // Wix Order Number (e.g., #1001) - беремо з номера замовлення, якщо він є.
-            const wixOrderNumber = wixOrder.number || wixOrder.id; // Фоллбек на ID, якщо number відсутній
+            // Отримуємо всі три ідентифікатори. Фоллбек на 'N/A'
+            const externalId = wixOrder.channelInfo?.externalOrderId || 'N/A'; // Murkit Number
+            const wixOrderNumber = wixOrder.number || 'N/A'; // Human-Readable Wix Order Number
+            const wixOrderId = wixOrder.id; // Wix Order ID (UUID)
 
-            if (!externalId) {
-                return res.status(404).json({ error: 'External Murkit ID not found for this Wix order.' });
-            }
-
-            // Return the necessary data
+            // Повертаємо всі три значення
             return res.status(200).json({
-                wix_id: wixOrder.id,
-                wix_number: wixOrderNumber, // Додаємо номер
+                wix_id: wixOrderId,
+                wix_number: wixOrderNumber, 
                 murkit_number: externalId 
             });
 
         } catch (error) {
-            console.error(`API Error in monomarket.js lookup for Wix ID ${lookupId}:`, error.message);
+            console.error(`API Error in monomarket.js lookup for ID ${lookupId}:`, error.message);
             return res.status(500).json({ error: `Internal server error during order lookup: ${error.message}` });
         }
     }
-    // --- END JSON LOOKUP FIX ---
+    // --- END UPDATED JSON LOOKUP LOGIC ---
 
     try {
         const { sheets, spreadsheetId } = await ensureAuth();
@@ -345,8 +365,8 @@ export default async function handler(req, res) {
                 
                 <h2>Перевірка номера замовлення</h2>
                 <div class="order-lookup-box">
-                    <strong>Wix Order ID:</strong>
-                    <input type="text" id="wixOrderId" placeholder="Вставте ID (наприклад: 89700e12-...) або Order Number (наприклад: #1001)">
+                    <strong>Wix ID / Murkit ID:</strong>
+                    <input type="text" id="wixOrderId" placeholder="Вставте Wix ID (UUID) або Зовнішній номер (Murkit ID)">
                     <button onclick="lookupOrder()">Отримати номери</button>
                     <span id="lookupResult" class="lookup-result"></span>
                 </div>
@@ -367,13 +387,11 @@ export default async function handler(req, res) {
                         resultSpan.className = "lookup-result";
 
                         try {
-                            // FIX: Теперь JS обращается к текущему эндпоинту (/monomarket), 
-                            // который мы настроили на возврат JSON при наличии query параметра 'id'.
                             const res = await fetch('?id=' + encodeURIComponent(id)); 
                             
                             // 1. Check response status to avoid HTML parsing errors
                             if (!res.ok) {
-                                // FIXED: Replaced template literals with string concatenation
+                                // Використовуємо конкатенацію для уникнення проблем із шаблонними літералами
                                 const errorData = await res.json().catch(() => ({error: 'Unknown API error'}));
                                 const errorMsg = errorData.error || 'Unknown Error (' + res.status + ')';
                                 
@@ -384,10 +402,10 @@ export default async function handler(req, res) {
                             
                             const data = await res.json();
                             
-                            // 2. Display both Wix ID and Murkit number (MODIFIED LOGIC, FIXED SYNTAX)
-                            if (data.wix_id && data.murkit_number) {
-                                // FIXED: Used string concatenation for innerHTML to avoid template literal conflicts
-                                resultSpan.innerHTML = "Wix ID: <strong>" + data.wix_id + "</strong><br>" +
+                            // 2. Виводимо всі три значення
+                            if (data.wix_id && data.murkit_number && data.wix_number) {
+                                resultSpan.innerHTML = "Wix Order ID: <strong>" + data.wix_id + "</strong><br>" +
+                                                       "Wix Order Number: <strong>" + data.wix_number + "</strong><br>" + 
                                                        "Зовнішній номер (Murkit): <strong>" + data.murkit_number + "</strong>";
                                 resultSpan.className = "lookup-result res-success";
                             } else if (data.error) {
@@ -463,15 +481,20 @@ export default async function handler(req, res) {
                         let debugText;
                         
                         if (url) {
+                            // If we have a valid URL, no debug text needed
                             debugText = ''; 
                         } else if (rawContent === '') {
-                            debugText = `ПУСТО: ${mappedHeader}`;
+                            // Content is empty
+                            debugText = \`ПУСТО: ${mappedHeader}\`;
                         } else if (rawContent.length > 20) {
-                            debugText = `КОНТЕНТ (${rawContent.substring(0, 10)}...)`;
+                            // Content is long, but not an image URL (e.g., formula result)
+                            debugText = \`КОНТЕНТ (${rawContent.substring(0, 10)}...)\`;
                         } else {
+                            // Short content (e.g., 'CellImage' or error text)
                             debugText = rawContent;
                         }
-                        
+
+                        // Використовуємо конкатенацію для уникнення проблем із шаблонними літералами
                         return (
                             '<td class="img-cell" title="Фото ' + (index + 1) + ' | Header: ' + mappedHeader + ' | Raw: ' + rawContent + '">' +
                             (url 
@@ -480,7 +503,6 @@ export default async function handler(req, res) {
                             ) +
                             '</td>'
                         );
-
                     }).join('')}
                     <td>${item.sku}</td>
                     <td>${item.name}</td>
