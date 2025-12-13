@@ -15,7 +15,141 @@ import {
 import { ensureAuth } from '../lib/sheetsClient.js'; 
 
 const WIX_STORES_APP_ID = "215238eb-22a5-4c36-9e7b-e7c08025e04e"; 
-// ... (Остальной вспомогательный код остается без изменений)
+
+const SHIPPING_TITLES = {
+    BRANCH: "НП Відділення",  
+    COURIER: "НП Кур'єр",
+    POSTOMAT: "НП Поштомат"
+};
+
+const WIX_TO_MURKIT_STATUS_MAPPING = {
+    "НП Відділення": "nova-post", 
+    "НП Кур'єр": "courier-nova-post",
+    "НП Поштомат": "nova-post:postomat"
+};
+
+function createError(status, message, code = null) {
+    const err = new Error(message);
+    err.status = status;
+    if (code) err.code = code;
+    return err;
+}
+
+function normalizeSku(sku) {
+    if (!sku) return '';
+    return String(sku).trim();
+}
+
+export function checkAuth(req) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) return false;
+  const b64auth = authHeader.split(' ')[1];
+  const credentials = Buffer.from(b64auth, 'base64').toString('utf-8'); 
+  const [login, password] = credentials.split(':');
+  return login === process.env.MURKIT_USER && password === process.env.MURKIT_PASS;
+}
+
+async function readSheetData(sheets, spreadsheetId) {
+    let importRes, controlRes;
+    try {
+        importRes = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Import!A1:ZZ' });
+        controlRes = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Feed Control List!A1:F' });
+    } catch (e) {
+        throw createError(500, `Failed to fetch data from Google Sheets (API ERROR): ${e.message}`, "SHEETS_API_ERROR");
+    }
+
+    const importValues = (importRes && importRes.data && importRes.data.values) ? importRes.data.values : [];
+    const controlValues = (controlRes && controlRes.data && controlRes.data.values) ? controlRes.data.values : [];
+    
+    if (importValues.length === 0 || controlValues.length === 0) {
+        throw createError(500, 'Sheets: Empty or invalid data retrieved from critical sheets (check data ranges and sheet names).', "SHEETS_DATA_EMPTY");
+    }
+    return { importValues: importValues, controlValues: controlValues };
+}
+
+function getProductSkuMap(importValues, controlValues) {
+    const headers = importValues[0] || [];
+    const rows = importValues.slice(1);
+    const controlHeaders = controlValues[0] || [];
+    const controlRows = controlValues.slice(1);
+
+    const idxImportField = controlHeaders.indexOf('Import field');
+    const idxFeedName = controlHeaders.indexOf('Feed name');
+
+    let murkitCodeColRaw = '';
+    let wixSkuColRaw = '';
+
+    controlRows.forEach(row => {
+        const importField = row[idxImportField];
+        const feedName = row[idxFeedName];
+        if (feedName === 'code') murkitCodeColRaw = String(importField).trim();
+        if (feedName === 'id') wixSkuColRaw = String(importField).trim();
+    });
+    
+    const murkitCodeColIndex = headers.indexOf(murkitCodeColRaw);
+    const wixSkuColIndex = headers.indexOf(wixSkuColRaw);
+    
+    if (murkitCodeColIndex === -1 || wixSkuColIndex === -1) return {};
+
+    const map = {};
+    rows.forEach(row => {
+        const mCode = row[murkitCodeColIndex] ? String(row[murkitCodeColIndex]).trim() : '';
+        const wSku = row[wixSkuColIndex] ? String(row[wixSkuColIndex]).trim() : '';
+        if (mCode && wSku) map[mCode] = wSku;
+    });
+    return map;
+}
+
+const fmtPrice = (num) => parseFloat(num || 0).toFixed(2);
+
+function getFullName(nameObj) {
+    if (!nameObj) return { firstName: "Client", lastName: "" };
+    return {
+        firstName: String(nameObj.first || nameObj.firstName || "Client"),
+        lastName: String(nameObj.last || nameObj.lastName || "")
+    };
+}
+
+function mapWixOrderToMurkitResponse(wixOrder, fulfillments, externalId) {
+    const orderStatus = wixOrder.fulfillmentStatus || wixOrder.status;
+    const wixShippingLine = wixOrder.shippingInfo?.title || ''; 
+
+    let murkitStatus = 'accepted';
+    let murkitCancelStatus = null;
+    let shipmentType = null;
+    let shipment = null;
+    let ttn = null;
+
+    if (Array.isArray(fulfillments) && fulfillments.length > 0) {
+        const fulfillmentWithTtn = fulfillments
+            .find(f => f.trackingInfo && String(f.trackingInfo.trackingNumber || '').trim().length > 0);
+        
+        if (fulfillmentWithTtn) {
+            ttn = String(fulfillmentWithTtn.trackingInfo.trackingNumber).trim();
+            shipmentType = WIX_TO_MURKIT_STATUS_MAPPING[wixShippingLine.trim()] || 'nova-post'; 
+            shipment = { ttn: ttn };
+        }
+    }
+    
+    if (wixOrder.status === 'CANCELED') { 
+        murkitStatus = 'canceled';
+        murkitCancelStatus = 'canceled';
+    } 
+    else if (orderStatus === 'FULFILLED') {
+        murkitStatus = 'sent';
+    } 
+    else {
+        murkitStatus = 'accepted';
+    }
+
+    return {
+        id: externalId, 
+        status: murkitStatus,
+        cancelStatus: murkitCancelStatus,
+        shipmentType: wixOrder.status === 'CANCELED' ? null : shipmentType,
+        shipment: wixOrder.status === 'CANCELED' ? null : shipment
+    };
+}
 
 // --- MAIN HANDLER ---
 export default async function handler(req, res) {
@@ -60,7 +194,7 @@ export default async function handler(req, res) {
                     const currency = currentWixOrder.priceSummary?.total?.currency || "UAH";
                     let refundSuccess = false;
 
-                    // 1. Ищем ID оплаты, которую мы создали (теперь более надежно)
+                    // 1. Ищем ID оплаты
                     console.log(`[DEBUG] Attempting to find payment details for order: ${wixOrderId}`);
                     const payment = await getWixPaymentDetails(wixOrderId);
                     
@@ -84,9 +218,7 @@ export default async function handler(req, res) {
                     } 
                     
                     if (!refundSuccess) {
-                         // В этом блоке мы окажемся, если:
-                         // а) payment.id не найден (нет payment)
-                         // б) createWixRefund вернул null (ошибка API)
+                         // Мы здесь, если Payment ID не найден, или Refund API вернул ошибку/null
                          console.warn(`[DEBUG] Payment or Refund failed for order ${wixOrderId}. Skipping refund and logging note.`);
                          await updateWixOrderDetails(wixOrderId, {
                               buyerNote: "⚠️ REFUND REQUIRED (AUTO-REFUND FAILED: NO PAYMENT ID or API ERROR)"
@@ -94,6 +226,7 @@ export default async function handler(req, res) {
                     }
 
                 } catch (updateError) {
+                    // Если сам процесс Refund (API вызов) выдал исключение
                     console.error(`Wix refund logic failed for ${wixOrderId}:`, updateError.message);
                     await updateWixOrderDetails(wixOrderId, {
                          buyerNote: `⚠️ REFUND REQUIRED (AUTO-REFUND CRASHED: ${updateError.message})`
@@ -144,9 +277,7 @@ export default async function handler(req, res) {
             return res.status(status).json({ message: 'Internal server error while processing cancellation request', code: 'INTERNAL_ERROR' });
         }
     }
-    
-    // ... (Остальной код)
-    
+
     // --- 2. GET Order Endpoint ---
     const singleOrderPathMatch = urlPath.match(/\/orders\/([^/]+)$/);
     if (req.method === 'GET' && singleOrderPathMatch) {
