@@ -379,12 +379,11 @@ export default async function handler(req, res) {
                             
                             const data = await res.json();
                             
-                            // 2. Display both Wix ID and Murkit number (MODIFIED LOGIC)
+                            // 2. Display both Wix ID and Murkit number (MODIFIED LOGIC, FIXED SYNTAX)
                             if (data.wix_id && data.murkit_number) {
-                                resultSpan.innerHTML = \`
-                                    Wix ID: <strong>\${data.wix_id}</strong><br>
-                                    Зовнішній номер (Murkit): <strong>\${data.murkit_number}</strong>
-                                \`;
+                                // Changed from template literal to string concatenation to avoid escaping issues
+                                resultSpan.innerHTML = "Wix ID: <strong>" + data.wix_id + "</strong><br>" +
+                                                       "Зовнішній номер (Murkit): <strong>" + data.murkit_number + "</strong>";
                                 resultSpan.className = "lookup-result res-success";
                             } else if (data.error) {
                                 resultSpan.textContent = "Помилка: " + data.error;
