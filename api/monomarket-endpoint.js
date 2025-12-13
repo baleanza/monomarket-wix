@@ -499,7 +499,7 @@ export default async function handler(req, res) {
                     cost: { price: { amount: "0.00", currency } }
                 },
                 buyerInfo: { email: email },
-                // paymentStatus не ставим, чтобы заказ был UNPAID (ждем добавления транзакции)
+                // НЕ ставим paymentStatus, заказ создается UNPAID
                 currency: currency,
                 weightUnit: "KG",
                 taxIncludedInPrices: false,
