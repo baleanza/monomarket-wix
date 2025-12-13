@@ -370,18 +370,18 @@ export default async function handler(req, res) {
                             // 1. Check response status to avoid HTML parsing errors
                             if (!res.ok) {
                                 const errorData = await res.json().catch(() => ({error: 'Unknown API error'}));
-                                const errorMsg = errorData.error || \`Unknown Error (\${res.status})\`;
+                                // FIXED: Replaced template literals with string concatenation
+                                const errorMsg = errorData.error || 'Unknown Error (' + res.status + ')';
                                 
-                                resultSpan.textContent = \`Помилка сервера (\${res.status}): \${errorMsg}\`;
+                                resultSpan.textContent = 'Помилка сервера (' + res.status + '): ' + errorMsg;
                                 resultSpan.className = "lookup-result res-error";
                                 return;
                             }
                             
                             const data = await res.json();
                             
-                            // 2. Display both Wix ID and Murkit number (MODIFIED LOGIC, FIXED SYNTAX)
+                            // 2. Display both Wix ID and Murkit number
                             if (data.wix_id && data.murkit_number) {
-                                // Changed from template literal to string concatenation to avoid escaping issues
                                 resultSpan.innerHTML = "Wix ID: <strong>" + data.wix_id + "</strong><br>" +
                                                        "Зовнішній номер (Murkit): <strong>" + data.murkit_number + "</strong>";
                                 resultSpan.className = "lookup-result res-success";
@@ -457,28 +457,28 @@ export default async function handler(req, res) {
                         const mappedHeader = finalImageCols[index].sheetHeader;
                         let debugText;
                         
+                        // NOTE: These internal template literals are fine as they are purely JS string assignments.
                         if (url) {
-                            // If we have a valid URL, no debug text needed
                             debugText = ''; 
                         } else if (rawContent === '') {
-                            // Content is empty
-                            debugText = \`ПУСТО: \${mappedHeader}\`;
+                            debugText = `ПУСТО: ${mappedHeader}`;
                         } else if (rawContent.length > 20) {
-                            // Content is long, but not an image URL (e.g., formula result)
-                            debugText = \`КОНТЕНТ (\${rawContent.substring(0, 10)}...)\`;
+                            debugText = `КОНТЕНТ (${rawContent.substring(0, 10)}...)`;
                         } else {
-                            // Short content (e.g., 'CellImage' or error text)
                             debugText = rawContent;
                         }
+                        
+                        // FIXED: Replaced the template literal return string with string concatenation 
+                        // to avoid conflicts with the outer 'html' template literal.
+                        return (
+                            '<td class="img-cell" title="Фото ' + (index + 1) + ' | Header: ' + mappedHeader + ' | Raw: ' + rawContent + '">' +
+                            (url 
+                                ? '<img src="' + url + '" alt="Фото ' + (index + 1) + '" loading="lazy">' 
+                                : '<span class="img-placeholder">' + debugText + '</span>'
+                            ) +
+                            '</td>'
+                        );
 
-                        return \`
-                            <td class="img-cell" title="Фото \${index + 1} | Header: \${mappedHeader} | Raw: \${rawContent}">
-                                \${url 
-                                    ? \`<img src="\${url}" alt="Фото \${index + 1}" loading="lazy">\` 
-                                    : \`<span class="img-placeholder">\${debugText}</span>\`
-                                }
-                            </td>
-                        \`;
                     }).join('')}
                     <td>${item.sku}</td>
                     <td>${item.name}</td>
