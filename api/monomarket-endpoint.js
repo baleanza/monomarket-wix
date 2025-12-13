@@ -7,6 +7,7 @@ import {
     cancelWixOrderById,
     adjustInventory,
     getWixOrderFulfillmentsBatch
+    // Import updateWixOrderStatus here once added to lib/wixClient.js
 } from '../lib/wixClient.js';
 import { ensureAuth } from '../lib/sheetsClient.js'; 
 
@@ -204,18 +205,29 @@ export default async function handler(req, res) {
             let fulfillments;
 
             if (isSent) {
-                // Case 1: Заказ уже отправлен (FULFILLED). Возвращаем 'canceling' статус Murkit.
+                // Case 1: Заказ уже отправлен (FULFILLED). 
                 
-                // Fetch fulfillments to correctly construct the 'sent' part of the response
+                // 1. Обновляем статус в Wix на REJECTED (или другой, который используете для возвратов)
+                // !!! ВАЖНО: Требуется функция updateWixOrderStatus в lib/wixClient.js
+                // !!! ЕЕ НЕТ в предоставленных файлах. Разкомментируйте, когда добавите!
+                /*
+                try {
+                    await updateWixOrderStatus(wixOrderId, "REJECTED"); 
+                    console.log(`Order ${wixOrderId} FULFILLED. Wix status successfully set to REJECTED.`);
+                } catch (updateError) {
+                    console.error(`Wix status update FAILED for order ${wixOrderId}:`, updateError);
+                    // Продолжаем, т.к. приоритет — ответ Murkit
+                }
+                */
+                console.log(`Order ${wixOrderId} FULFILLED. Wix status update to REJECTED pending new function in wixClient.js.`);
+
+
+                // 2. Возвращаем 'canceling' статус Murkit.
                 fulfillments = await getWixOrderFulfillments(wixOrderId); 
-                
-                // Generate the standard response for a 'sent' order
                 murkitResponse = mapWixOrderToMurkitResponse(currentWixOrder, fulfillments, wixOrderId);
-                
-                // OVERRIDE: Устанавливаем промежуточный статус отмены 'canceling'
                 murkitResponse.cancelStatus = 'canceling';
                 
-                console.log(`Order ${wixOrderId} is FULFILLED, returning cancelStatus: 'canceling' to Murkit.`);
+                console.log(`Returning cancelStatus: 'canceling' to Murkit.`);
 
                 return res.status(200).json(murkitResponse);
                 
