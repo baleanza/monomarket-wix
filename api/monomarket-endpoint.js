@@ -110,7 +110,6 @@ function getFullName(nameObj) {
     };
 }
 
-// === ОБНОВЛЕННАЯ ЛОГИКА ДЛЯ ОТВЕТА МУРКИТУ ===
 function mapWixOrderToMurkitResponse(wixOrder, fulfillments, externalId) {
     const orderStatus = wixOrder.fulfillmentStatus || wixOrder.status;
     const wixShippingLine = wixOrder.shippingInfo?.title || ''; 
@@ -121,7 +120,6 @@ function mapWixOrderToMurkitResponse(wixOrder, fulfillments, externalId) {
     let shipment = null;
     let ttn = null;
 
-    // 1. Поиск TTN (так как это нужно в случае FULFILLED)
     if (Array.isArray(fulfillments) && fulfillments.length > 0) {
         const fulfillmentWithTtn = fulfillments
             .find(f => f.trackingInfo && String(f.trackingInfo.trackingNumber || '').trim().length > 0);
@@ -133,22 +131,16 @@ function mapWixOrderToMurkitResponse(wixOrder, fulfillments, externalId) {
         }
     }
     
-    // 2. Определение статуса для Murkit
     if (wixOrder.status === 'CANCELED') { 
         murkitStatus = 'canceled';
         murkitCancelStatus = 'canceled';
     } 
     else if (orderStatus === 'FULFILLED') {
         murkitStatus = 'sent';
-        // Если отгружено, cancelStatus ставим в null, 
-        // так как этот статус будет задаваться только при запросе отмены (см. блок PUT)
     } 
     else {
         murkitStatus = 'accepted';
     }
-
-    // Если заказ FULFILLED, и мы нашли TTN, то shipmentType и shipment уже заданы
-    // Если заказ CANCELED, они должны быть null (как в образце)
 
     return {
         id: externalId, 
@@ -158,7 +150,6 @@ function mapWixOrderToMurkitResponse(wixOrder, fulfillments, externalId) {
         shipment: wixOrder.status === 'CANCELED' ? null : shipment
     };
 }
-
 
 // --- MAIN HANDLER ---
 export default async function handler(req, res) {
@@ -181,13 +172,10 @@ export default async function handler(req, res) {
             }
             
             const isSent = currentWixOrder.fulfillmentStatus === 'FULFILLED';
-            
             let murkitResponse;
             let fulfillments;
 
-            // 1. ПРОВЕРКА: ЗАКАЗ УЖЕ ОТМЕНЕН?
             if (currentWixOrder.status === 'CANCELED') {
-                // Если Wix уже отменил заказ, возвращаем финальный статус отмены.
                 const batchResponse = await getWixOrderFulfillmentsBatch([wixOrderId]);
                 const orderFulfillmentData = batchResponse[0];
                 fulfillments = (orderFulfillmentData && orderFulfillmentData.fulfillments) ? orderFulfillmentData.fulfillments : [];
@@ -199,21 +187,22 @@ export default async function handler(req, res) {
                 return res.status(200).json(murkitResponse);
             }
 
-            // 2. ЛОГИКА FULFILLED (Заказ отправлен, но нужно отменить)
             if (isSent) {
-                // Выполняем Refund и отвечаем canceling/sent
-                
+                // FULFILLED LOGIC
                 try {
                     await updateWixOrderDetails(wixOrderId, {
                          buyerNote: "⚠️ КЛІЄНТ ПОПРОСИВ ПОВЕРНЕННЯ / REFUND"
                     });
                     
+                    // === START DEBUG ===
+                    console.log(`[DEBUG] Fetching transactions for order: ${wixOrderId}`);
                     const transactions = await getWixOrderTransactions(wixOrderId);
+                    console.log(`[DEBUG] Raw transactions:`, JSON.stringify(transactions, null, 2)); 
+                    // === END DEBUG ===
+
                     let paymentIdToRefund = null;
                     
                     if (transactions && transactions.length > 0) {
-                         // === [FIX] УНИВЕРСАЛЬНЫЙ ПОИСК ТРАНЗАКЦИИ ===
-                         // Ищем любую транзакцию, которая является оплатой (ORDER_PAID) или имеет сумму > 0
                          const tx = transactions.find(t => 
                             t.type === 'ORDER_PAID' || 
                             (t.amount && parseFloat(t.amount.amount) > 0)
@@ -228,15 +217,13 @@ export default async function handler(req, res) {
                         await createWixRefund(wixOrderId, paymentIdToRefund, totalAmount, currency);
                         console.log(`Order ${wixOrderId} FULFILLED. Payment status set to REFUNDED.`);
                     } else {
-                         console.warn(`No payment transaction found for order ${wixOrderId}. Skipping refund.`);
-                         // Даже если не нашли транзакцию, мы все равно вернем "canceling", так как логика Murkit этого требует
+                         console.warn(`[DEBUG] No payment transaction found for order ${wixOrderId}. Skipping refund.`);
                     }
 
                 } catch (updateError) {
                     console.error(`Wix refund logic failed for ${wixOrderId}:`, updateError.message);
                 }
 
-                // Формируем ответ для Murkit: статус SENT, отмена CANCELING, с TTN
                 const batchResponse = await getWixOrderFulfillmentsBatch([wixOrderId]);
                 const orderFulfillmentData = batchResponse[0];
                 fulfillments = (orderFulfillmentData && orderFulfillmentData.fulfillments) ? orderFulfillmentData.fulfillments : [];
@@ -249,8 +236,7 @@ export default async function handler(req, res) {
                 return res.status(200).json(mappedResponse);
                 
             } else {
-                // 3. ЛОГИКА NOT FULFILLED (Обычная отмена)
-                
+                // NOT FULFILLED LOGIC
                 const cancelResult = await cancelWixOrderById(wixOrderId);
 
                 if (cancelResult.status === 409) {
@@ -282,7 +268,7 @@ export default async function handler(req, res) {
         }
     }
 
-    // --- 2. GET Order Endpoint (Статус заказа) ---
+    // --- 2. GET Order Endpoint ---
     const singleOrderPathMatch = urlPath.match(/\/orders\/([^/]+)$/);
     if (req.method === 'GET' && singleOrderPathMatch) {
         const wixOrderId = singleOrderPathMatch[1];
@@ -295,14 +281,11 @@ export default async function handler(req, res) {
             const fulfillments = (orderFulfillmentData && orderFulfillmentData.fulfillments) ? orderFulfillmentData.fulfillments : [];
 
             const murkitResponse = mapWixOrderToMurkitResponse(wixOrder, fulfillments, wixOrderId);
-            
             if (wixOrder.status === 'CANCELED') {
                  murkitResponse.status = 'canceled';
                  murkitResponse.cancelStatus = 'canceled';
             }
-
             return res.status(200).json(murkitResponse);
-
         } catch (error) {
             return res.status(500).json({ message: 'Internal server error', code: 'INTERNAL_ERROR' });
         }
@@ -348,15 +331,12 @@ export default async function handler(req, res) {
         const responses = ordersToProcess.map(result => {
             const fulfillmentsForOrder = batchFulfillmentMap.get(result.id) || [];
             const murkitResponse = mapWixOrderToMurkitResponse(result.order, fulfillmentsForOrder, result.id);
-            
             if (result.order.status === 'CANCELED') {
                  murkitResponse.status = 'canceled';
                  murkitResponse.cancelStatus = 'canceled';
             }
-            
             return murkitResponse;
         });
-
         return res.status(200).json({ orders: responses, errors: errors });
     }
 
@@ -407,7 +387,6 @@ export default async function handler(req, res) {
 
             const lineItems = [];
             const adjustments = []; 
-            
             for (const item of itemsWithSku) {
                 const requestedQty = parseInt(item.quantity || 1, 10);
                 const targetSku = normalizeSku(item.wixSku); 
@@ -441,7 +420,6 @@ export default async function handler(req, res) {
                 if (stockData.inStock === false || (stockData.trackQuantity && stockData.quantity < requestedQty)) {
                      throw createError(409, `Product ${item.code} not enough stock`, "ITEM_NOT_AVAILABLE");
                 }
-
                 if (stockData.trackQuantity === true) {
                     adjustments.push({ productId: catalogItemId, variantId: variantId, quantity: requestedQty });
                 }
@@ -480,7 +458,6 @@ export default async function handler(req, res) {
             const clientPhone = String(murkitData.client?.phone || "").replace(/\D/g,''); 
             const recipientPhone = String(murkitData.recipient?.phone || murkitData.client?.phone || "").replace(/\D/g,'');
             
-            // --- ЛОГИКА EMAIL ---
             let email = murkitData.client?.email;
             if (!email || !email.includes('@')) {
                 const phoneForId = clientPhone || recipientPhone || "0000000000";
@@ -527,7 +504,6 @@ export default async function handler(req, res) {
 
             const shippingAddress = { country: "UA", city: npCity || "City", addressLine: finalAddressLine, postalCode: "00000" };
 
-            // --- Custom Fields ---
             const customFields = [];
             if (cartNumber) {
                 customFields.push({
@@ -569,13 +545,10 @@ export default async function handler(req, res) {
                     console.error(`Warning: Failed to add payment to order ${newOrderId}`, payErr);
                 }
             }
-            
             if (adjustments.length > 0) {
                 try { await adjustInventory(adjustments); } catch (adjErr) { console.error("Warning: Inventory adjustment failed", adjErr); }
             }
-
             return res.status(201).json({ "id": newOrderId }); 
-
         } catch (e) {
             console.error('Murkit Webhook Error:', e.message);
             const status = e.status || 500;
