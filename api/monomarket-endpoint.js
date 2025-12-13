@@ -7,22 +7,21 @@ import {
     cancelWixOrderById,
     adjustInventory,
     getWixOrderFulfillmentsBatch,
-    updateWixOrderNote,     // Імпорт
-    getWixOrderTransactions, // Імпорт
-    createWixRefund         // Імпорт
+    updateWixOrderDetails,
+    getWixOrderTransactions, 
+    createWixRefund,
+    addExternalPayment // <--- НОВА ФУНКЦІЯ
 } from '../lib/wixClient.js';
 import { ensureAuth } from '../lib/sheetsClient.js'; 
 
 const WIX_STORES_APP_ID = "215238eb-22a5-4c36-9e7b-e7c08025e04e"; 
 
-// === SHIPPING TITLE CONFIGURATION (for order creation) ===
 const SHIPPING_TITLES = {
     BRANCH: "НП Відділення",  
     COURIER: "НП Кур'єр",
     POSTOMAT: "НП Поштомат"
 };
 
-// === MAPPING FOR STATUS RETRIEVAL (for status fetching) ===
 const WIX_TO_MURKIT_STATUS_MAPPING = {
     "НП Відділення": "nova-post", 
     "НП Кур'єр": "courier-nova-post",
@@ -50,40 +49,22 @@ export function checkAuth(req) {
   return login === process.env.MURKIT_USER && password === process.env.MURKIT_PASS;
 }
 
-// readSheetData (FINAL FIX: Uses ONLY sequential reading with enhanced checks)
 async function readSheetData(sheets, spreadsheetId) {
     let importRes, controlRes;
-    
-    console.log('Sheets: Starting SEQUENTIAL fetch for Import and Feed Control Lists.');
-    
     try {
-        // FIX: Fetch 1: Import List (Sequential call, restored original successful logic)
         importRes = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Import!A1:ZZ' });
-        
-        // FIX: Fetch 2: Control List (Sequential call, restored original successful logic)
         controlRes = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Feed Control List!A1:F' });
-        
     } catch (e) {
-        // Log the full error to help with diagnostics
-        console.error('Sheets API Call FAILED (Sequential Catch):', e.message);
         throw createError(500, `Failed to fetch data from Google Sheets (API ERROR): ${e.message}`, "SHEETS_API_ERROR");
     }
 
-    // Safely access data, preventing the "Cannot read properties of undefined (reading 'values')" error
     const importValues = (importRes && importRes.data && importRes.data.values) ? importRes.data.values : [];
     const controlValues = (controlRes && controlRes.data && controlRes.data.values) ? controlRes.data.values : [];
     
-    // CRITICAL CHECK: If data is unexpectedly empty
     if (importValues.length === 0 || controlValues.length === 0) {
         throw createError(500, 'Sheets: Empty or invalid data retrieved from critical sheets (check data ranges and sheet names).', "SHEETS_DATA_EMPTY");
     }
-    
-    console.log('Sheets: Data fetched successfully (Sequential).');
-    
-    return { 
-        importValues: importValues, 
-        controlValues: controlValues 
-    };
+    return { importValues: importValues, controlValues: controlValues };
 }
 
 function getProductSkuMap(importValues, controlValues) {
@@ -129,7 +110,6 @@ function getFullName(nameObj) {
     };
 }
 
-// --- FUNCTION: Mapping Wix Status to Murkit Response Format ---
 function mapWixOrderToMurkitResponse(wixOrder, fulfillments, externalId) {
     const orderStatus = wixOrder.fulfillmentStatus || wixOrder.status;
     const wixShippingLine = wixOrder.shippingInfo?.title || ''; 
@@ -151,7 +131,6 @@ function mapWixOrderToMurkitResponse(wixOrder, fulfillments, externalId) {
         murkitStatus = 'accepted';
     }
 
-    // CHECK IF FULFILLMENT DATA CONTAINS TTN
     if (Array.isArray(fulfillments) && fulfillments.length > 0) {
         const fulfillmentWithTtn = fulfillments
             .find(f => f.trackingInfo && String(f.trackingInfo.trackingNumber || '').trim().length > 0);
@@ -179,12 +158,10 @@ function mapWixOrderToMurkitResponse(wixOrder, fulfillments, externalId) {
 
 // --- MAIN HANDLER ---
 export default async function handler(req, res) {
-    // 0. Initial Auth Check
     if (!checkAuth(req)) {
         return res.status(401).json({ error: 'Unauthorized' });
     }
     
-    // FIX 1: URL cleanup
     const urlPathFull = req.url;
     const urlPath = urlPathFull.split('?')[0]; 
 
@@ -194,102 +171,74 @@ export default async function handler(req, res) {
         const wixOrderId = cancelOrderPathMatch[1]; 
 
         try {
-            // 1. Fetch current order state
             const currentWixOrder = await findWixOrderById(wixOrderId);
             if (!currentWixOrder) {
                  return res.status(404).json({ message: 'Order does not exist', code: 'NOT_FOUND' });
             }
             
-            // Проверяем, отгружен ли заказ (есть ли статус FULFILLED)
             const isSent = currentWixOrder.fulfillmentStatus === 'FULFILLED';
             
             let murkitResponse;
             let fulfillments;
 
             if (isSent) {
-                // Case 1: Заказ уже отправлен (FULFILLED). 
+                // Case 1: Заказ уже отправлен (FULFILLED).
                 
-                // --- СТРАТЕГІЯ: ЗМІНА СТАТУСУ ОПЛАТИ НА REFUNDED ---
                 try {
-                    // 1. Оновлюємо Примітку (на всяк випадок)
-                    await updateWixOrderNote(wixOrderId, "⚠️ REFUNDED / CANCELED by MONOMARKET");
+                    // 1. Оновлюємо Примітку (Backup indicator)
+                    await updateWixOrderDetails(wixOrderId, {
+                         buyerNote: "⚠️ КЛІЄНТ ПОПРОСИВ ПОВЕРНЕННЯ / REFUND"
+                    });
                     
-                    // 2. Отримуємо транзакції, щоб знайти ID оплати
+                    // 2. Спроба знайти транзакцію і зробити REFUND
                     const transactions = await getWixOrderTransactions(wixOrderId);
-                    
-                    // Знаходимо першу успішну оплату (Charge/Payment)
-                    // Зазвичай тип 'ORDER_PLACED' або просто paymentId є у транзакції.
-                    // Структура транзакцій може відрізнятися, але зазвичай є масив payments
-                    // Або transactions[0].paymentId
-                    
                     let paymentIdToRefund = null;
                     
-                    // Пробуємо знайти paymentId
                     if (transactions && transactions.length > 0) {
-                        // Шукаємо транзакцію з type: 'CHARGE' або де є amount
-                         const chargeTx = transactions.find(t => t.type === 'CHARGE' || (t.amount && t.amount > 0));
-                         if (chargeTx) {
-                             paymentIdToRefund = chargeTx.paymentId || chargeTx._id; // _id часто є ID транзакції
-                         } else {
-                             // Беремо просто першу
-                             paymentIdToRefund = transactions[0].paymentId || transactions[0]._id;
-                         }
+                         // Шукаємо будь-яку транзакцію з ID
+                         const tx = transactions.find(t => t.paymentId || t._id);
+                         if (tx) paymentIdToRefund = tx.paymentId || tx._id;
                     }
 
                     if (paymentIdToRefund) {
                         const totalAmount = currentWixOrder.priceSummary?.total?.amount || "0";
                         const currency = currentWixOrder.priceSummary?.total?.currency || "UAH";
                         
+                        // Робимо повернення
                         await createWixRefund(wixOrderId, paymentIdToRefund, totalAmount, currency);
-                        console.log(`Order ${wixOrderId} FULFILLED. Payment marked as REFUNDED.`);
+                        console.log(`Order ${wixOrderId} FULFILLED. Payment status set to REFUNDED.`);
                     } else {
-                         console.warn(`Could not find payment ID to refund for order ${wixOrderId}`);
+                         console.warn(`No transaction found for order ${wixOrderId}. Skipping refund.`);
                     }
 
                 } catch (updateError) {
-                    console.error(`Wix refund/update FAILED for order ${wixOrderId}:`, updateError.message);
+                    console.error(`Wix refund logic failed for ${wixOrderId}:`, updateError.message);
                 }
 
-                // 2. Возвращаем 'canceling' статус Murkit.
                 fulfillments = await getWixOrderFulfillments(wixOrderId); 
                 murkitResponse = mapWixOrderToMurkitResponse(currentWixOrder, fulfillments, wixOrderId);
                 murkitResponse.cancelStatus = 'canceling';
                 
-                console.log(`Returning cancelStatus: 'canceling' to Murkit.`);
-
                 return res.status(200).json(murkitResponse);
                 
             } else {
-                // Case 2: Заказ НЕ отправлен. Продолжаем обычную отмену через Wix API.
-                
+                // Case 2: Заказ НЕ отправлен. Звичайне скасування.
                 const cancelResult = await cancelWixOrderById(wixOrderId);
 
                 if (cancelResult.status === 409) {
-                    // Handle Wix errors (already canceled, cannot cancel)
-                    let message;
-                    if (cancelResult.code === 'ORDER_ALREADY_CANCELED') {
-                        message = 'Order already canceled';
-                    } else if (cancelResult.code === 'CANNOT_CANCEL_ORDER') {
-                        message = 'Order already completed'; 
-                    } else {
-                        message = 'Cannot cancel order';
-                    }
+                    let message = 'Cannot cancel order';
+                    if (cancelResult.code === 'ORDER_ALREADY_CANCELED') message = 'Order already canceled';
+                    else if (cancelResult.code === 'CANNOT_CANCEL_ORDER') message = 'Order already completed'; 
+                    
                     return res.status(409).json({ message: message, code: cancelResult.code });
                 }
                 
                 if (cancelResult.status === 200) {
-                    // Successful cancellation in Wix. Return final 'canceled' to Murkit.
                     const wixOrder = await findWixOrderById(wixOrderId);
                     fulfillments = await getWixOrderFulfillments(wixOrderId); 
-                    
-                    if (!wixOrder) { 
-                        return res.status(500).json({ message: 'Internal server error: Order status not found after successful cancellation request', code: 'INTERNAL_ERROR' });
-                    }
-                    
                     murkitResponse = mapWixOrderToMurkitResponse(wixOrder, fulfillments, wixOrderId);
                     return res.status(200).json(murkitResponse);
                 }
-                
             }
 
         } catch (error) {
@@ -299,89 +248,63 @@ export default async function handler(req, res) {
         }
     }
 
-    // --- 2. GET Order Endpoint (FINAL FIX: Uses Batch for reliability) ---
+    // --- 2. GET Order Endpoint ---
     const singleOrderPathMatch = urlPath.match(/\/orders\/([^/]+)$/);
     if (req.method === 'GET' && singleOrderPathMatch) {
         const wixOrderId = singleOrderPathMatch[1];
-
         try {
             const wixOrder = await findWixOrderById(wixOrderId);
-
-            if (!wixOrder) {
-                return res.status(404).json({ message: 'Order does not exist', code: 'NOT_FOUND' });
-            }
+            if (!wixOrder) return res.status(404).json({ message: 'Order does not exist', code: 'NOT_FOUND' });
             
-            // FIX: Use reliable batch request, wrapped for a single ID
             const batchResponse = await getWixOrderFulfillmentsBatch([wixOrderId]);
-            
-            // Expecting [ { orderId: ID, fulfillments: [...] } ]
             const orderFulfillmentData = batchResponse[0];
-
-            const fulfillments = (orderFulfillmentData && orderFulfillmentData.fulfillments) 
-                ? orderFulfillmentData.fulfillments : [];
-
+            const fulfillments = (orderFulfillmentData && orderFulfillmentData.fulfillments) ? orderFulfillmentData.fulfillments : [];
 
             const murkitResponse = mapWixOrderToMurkitResponse(wixOrder, fulfillments, wixOrderId);
             return res.status(200).json(murkitResponse);
 
         } catch (error) {
-            console.error('GET Order Error:', error);
-            return res.status(500).json({ message: 'Internal server error while processing order status', code: 'INTERNAL_ERROR' });
+            return res.status(500).json({ message: 'Internal server error', code: 'INTERNAL_ERROR' });
         }
     }
 
-    // --- 3. POST Order Batch Endpoint (UPDATED LOGIC) ---
+    // --- 3. POST Order Batch Endpoint ---
     if (req.method === 'POST' && urlPath.includes('/orders/batch')) {
         let orderIds; 
         try {
             orderIds = req.body && req.body.orders;
-            if (!Array.isArray(orderIds) || orderIds.length === 0) {
-                return res.status(400).json({ message: 'Invalid or empty "orders" array in request body', code: 'BAD_REQUEST' });
-            }
+            if (!Array.isArray(orderIds) || orderIds.length === 0) throw new Error();
         } catch (e) {
-            return res.status(400).json({ message: 'Invalid JSON body or missing "orders" array', code: 'BAD_REQUEST' });
+            return res.status(400).json({ message: 'Invalid body', code: 'BAD_REQUEST' });
         }
 
-        // 1. Fetch all Orders in parallel
         const orderFetchResults = await Promise.all(orderIds.map(async (wixOrderId) => {
             try {
                 const wixOrder = await findWixOrderById(wixOrderId);
                 return { id: wixOrderId, order: wixOrder };
             } catch (error) {
-                return { id: wixOrderId, error: { message: 'Internal server error while fetching order status', code: 'INTERNAL_ERROR' } };
+                return { id: wixOrderId, error: { message: 'Internal Error', code: 'INTERNAL_ERROR' } };
             }
         }));
 
         const ordersToProcess = orderFetchResults.filter(r => r.order);
-        // Collect errors from order fetching (e.g., 404, network error)
-        const errors = orderFetchResults.filter(r => !r.order).map(r => r.error || { id: r.id, message: 'Order not found', code: 'NOT_FOUND' });
-        
+        const errors = orderFetchResults.filter(r => !r.order).map(r => r.error || { id: r.id, message: 'Not found', code: 'NOT_FOUND' });
         const idsToBatch = ordersToProcess.map(r => r.id);
         
         let batchFulfillmentMap = new Map();
-        
-        // 2. Fetch all Fulfillments in one batch call
         if (idsToBatch.length > 0) {
             try {
-                // USE EFFICIENT BATCH REQUEST
                 const batchResponse = await getWixOrderFulfillmentsBatch(idsToBatch);
-                
-                // Map fulfillments back to Order IDs
                 if (Array.isArray(batchResponse)) {
-                    batchResponse.forEach(orderFulfillmentData => {
-                        if (orderFulfillmentData.orderId && Array.isArray(orderFulfillmentData.fulfillments)) {
-                            // Map: orderId -> [fulfillment1, fulfillment2, ...]
-                            batchFulfillmentMap.set(orderFulfillmentData.orderId, orderFulfillmentData.fulfillments);
+                    batchResponse.forEach(ofd => {
+                        if (ofd.orderId && Array.isArray(ofd.fulfillments)) {
+                            batchFulfillmentMap.set(ofd.orderId, ofd.fulfillments);
                         }
                     });
                 }
-            } catch (e) {
-                console.error('Batch Fulfillment Fetch Error:', e);
-                // Errors in batch fulfillment do not stop the process, we continue returning statuses without shipment info
-            }
+            } catch (e) {}
         }
         
-        // 3. Map orders and fulfillments to Murkit Response format
         const responses = ordersToProcess.map(result => {
             const fulfillmentsForOrder = batchFulfillmentMap.get(result.id) || [];
             return mapWixOrderToMurkitResponse(result.order, fulfillmentsForOrder, result.id);
@@ -390,42 +313,29 @@ export default async function handler(req, res) {
         return res.status(200).json({ orders: responses, errors: errors });
     }
 
-    // --- 4. POST LOGIC (Order Creation - RESTORED ORIGINAL WORKING FLOW) ---
+    // --- 4. POST LOGIC (Order Creation - REVISED FOR REFUNDABILITY) ---
     if (req.method === 'POST') {
-        
-        // Safety check for path
-        if (urlPath.includes('/orders/')) {
-            return res.status(404).json({ message: 'Not Found' });
-        }
+        if (urlPath.includes('/orders/')) return res.status(404).json({ message: 'Not Found' });
 
         try {
             const murkitData = req.body;
-            
             if (!murkitData.number) throw createError(400, 'Missing order number');
             const murkitOrderId = String(murkitData.number);
             console.log(`Processing Murkit Order #${murkitOrderId}`);
 
-            // === STEP 0: DEDUPLICATION ===
             const existingOrder = await findWixOrderByExternalId(murkitOrderId);
             if (existingOrder) {
-                console.log(`Order #${murkitOrderId} already exists. ID: ${existingOrder.id}`);
-                // FIX: Now returns the Wix UUID (ID) instead of the user-facing number.
                 return res.status(200).json({ "id": existingOrder.id }); 
             }
 
-            // === ITEM VALIDATION ===
             const murkitItems = murkitData.items || [];
             if (murkitItems.length === 0) throw createError(400, 'No items in order');
 
             const currency = "UAH";
-
-            // 1. Sheets (FIXED implementation of readSheetData is used here)
             const { sheets, spreadsheetId } = await ensureAuth(); 
-            // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Используем переменную spreadsheetId, полученную из ensureAuth()
             const { importValues, controlValues } = await readSheetData(sheets, spreadsheetId);
             const codeToSkuMap = getProductSkuMap(importValues, controlValues);
             
-            // 2. Resolve SKUs
             const wixSkusToFetch = [];
             const itemsWithSku = murkitItems.map(item => {
                 const mCode = String(item.code).trim();
@@ -434,45 +344,28 @@ export default async function handler(req, res) {
                 return { ...item, wixSku: wSku };
             });
 
-            if (wixSkusToFetch.length === 0) {
-                throw createError(400, 'No valid SKUs found to fetch from Wix');
-            }
+            if (wixSkusToFetch.length === 0) throw createError(400, 'No valid SKUs');
 
-            // 3. Fetch Wix Products
             const wixProducts = await getProductsBySkus(wixSkusToFetch);
-            
-            // === CREATE SKU MAP ===
             const skuMap = {};
-
             wixProducts.forEach(p => {
                 const pSku = normalizeSku(p.sku);
-                if (pSku) {
-                    skuMap[pSku] = { type: 'product', product: p, variantData: null };
-                }
-
-                if (p.variants && p.variants.length > 0) {
-                    p.variants.forEach(v => {
-                        const vSku = normalizeSku(v.variant?.sku);
-                        if (vSku) {
-                            skuMap[vSku] = { type: 'variant', product: p, variantData: v };
-                        }
-                    });
-                }
+                if (pSku) skuMap[pSku] = { type: 'product', product: p, variantData: null };
+                if (p.variants) p.variants.forEach(v => {
+                    const vSku = normalizeSku(v.variant?.sku);
+                    if (vSku) skuMap[vSku] = { type: 'variant', product: p, variantData: v };
+                });
             });
 
-            // 4. Line Items
             const lineItems = [];
             const adjustments = []; 
             
             for (const item of itemsWithSku) {
                 const requestedQty = parseInt(item.quantity || 1, 10);
                 const targetSku = normalizeSku(item.wixSku); 
-
                 const match = skuMap[targetSku];
 
-                if (!match) {
-                    throw createError(409, `Product with code ${item.code} not found`, "ITEM_NOT_FOUND");
-                }
+                if (!match) throw createError(409, `Product ${item.code} not found`, "ITEM_NOT_FOUND");
 
                 const foundProduct = match.product;
                 const foundVariant = match.variantData; 
@@ -481,14 +374,12 @@ export default async function handler(req, res) {
                 let variantId = null;
                 let stockData = foundProduct.stock; 
                 let productName = foundProduct.name;
-                
                 let variantChoices = null; 
                 let descriptionLines = []; 
                 
                 if (foundVariant) {
                     variantId = foundVariant.variant.id; 
                     stockData = foundVariant.stock; 
-                    
                     if (foundVariant.choices) {
                         variantChoices = foundVariant.choices; 
                         descriptionLines = Object.entries(variantChoices).map(([k, v]) => ({
@@ -499,26 +390,16 @@ export default async function handler(req, res) {
                     }
                 } 
 
-                // === STOCK CHECK ===
-                if (stockData.inStock === false) {
-                     throw createError(409, `Product with code ${item.code} has not enough stock`, "ITEM_NOT_AVAILABLE");
-                }
-                
-                if (stockData.trackQuantity && (stockData.quantity < requestedQty)) {
-                     throw createError(409, `Product with code ${item.code} has not enough stock`, "ITEM_NOT_AVAILABLE");
+                if (stockData.inStock === false || (stockData.trackQuantity && stockData.quantity < requestedQty)) {
+                     throw createError(409, `Product ${item.code} not enough stock`, "ITEM_NOT_AVAILABLE");
                 }
 
-                // === COLLECT INVENTORY ADJUSTMENT DATA ===
                 if (stockData.trackQuantity === true) {
-                    adjustments.push({
-                        productId: catalogItemId,
-                        variantId: variantId, 
-                        quantity: requestedQty
-                    });
+                    adjustments.push({ productId: catalogItemId, variantId: variantId, quantity: requestedQty });
                 }
 
                 let imageObj = null;
-                if (foundProduct.media && foundProduct.media.mainMedia && foundProduct.media.mainMedia.image) {
+                if (foundProduct.media?.mainMedia?.image) {
                     imageObj = {
                         url: foundProduct.media.mainMedia.image.url,
                         width: foundProduct.media.mainMedia.image.width,
@@ -526,16 +407,10 @@ export default async function handler(req, res) {
                     };
                 }
 
-                const catalogRef = {
-                    catalogItemId: catalogItemId,
-                    appId: WIX_STORES_APP_ID
-                };
-
+                const catalogRef = { catalogItemId: catalogItemId, appId: WIX_STORES_APP_ID };
                 if (variantId) {
                     catalogRef.options = { variantId: variantId };
-                    if (variantChoices) {
-                        catalogRef.options.options = variantChoices;
-                    }
+                    if (variantChoices) catalogRef.options.options = variantChoices;
                 }
 
                 const lineItem = {
@@ -548,23 +423,14 @@ export default async function handler(req, res) {
                     price: { amount: fmtPrice(item.price) },
                     taxDetails: { taxRate: "0", totalTax: { amount: "0.00", currency: currency } }
                 };
-
-                if (imageObj) {
-                    lineItem.image = imageObj;
-                }
-
+                if (imageObj) lineItem.image = imageObj;
                 lineItems.push(lineItem);
             }
 
-            // 5. Order Data Preparation
             const clientName = getFullName(murkitData.client?.name);
             const recipientName = getFullName(murkitData.recipient?.name);
-            
-            // FIX: Separate phone numbers for client (billing) and recipient (shipping)
             const clientPhone = String(murkitData.client?.phone || "").replace(/\D/g,''); 
-            // Fallback to client phone if recipient phone is missing, but prioritize recipient phone
             const recipientPhone = String(murkitData.recipient?.phone || murkitData.client?.phone || "").replace(/\D/g,'');
-
             const email = murkitData.client?.email || "monomarket@mywoodmood.com";
 
             const priceSummary = {
@@ -576,8 +442,7 @@ export default async function handler(req, res) {
             };
 
             const d = murkitData.delivery || {}; 
-            const deliveryType = String(murkitData.deliveryType || '').toLowerCase(); // toLowerCase для надійної перевірки
-            
+            const deliveryType = String(murkitData.deliveryType || '').toLowerCase(); 
             const npCity = String(d.settlement || d.city || d.settlementName || '').trim();
             const street = String(d.address || '').trim();
             const house = String(d.house || '').trim();
@@ -585,133 +450,77 @@ export default async function handler(req, res) {
             const npWarehouse = String(d.warehouseNumber || '').trim();
 
             let extendedFields = {};
-            let finalAddressLine = "невідома адреса"; // Unknown address
+            let finalAddressLine = "невідома адреса";
             let deliveryTitle = "Delivery";
 
             if (deliveryType.includes('courier')) {
                 deliveryTitle = SHIPPING_TITLES.COURIER; 
-                
                 const addressParts = [];
                 if (street) addressParts.push(street);
-                if (house) addressParts.push(`буд. ${house}`); // building
-                if (flat) addressParts.push(`кв. ${flat}`);   // apartment
-                
-                finalAddressLine = addressParts.length > 0 
-                    ? addressParts.join(', ') 
-                    : `Адресна доставка (${npCity})`; // Address delivery
-
-            } else if (deliveryType.includes('postomat')) { // НОВА ЛОГІКА ДЛЯ ПОШТОМАТУ
+                if (house) addressParts.push(`буд. ${house}`);
+                if (flat) addressParts.push(`кв. ${flat}`);
+                finalAddressLine = addressParts.length > 0 ? addressParts.join(', ') : `Адресна доставка (${npCity})`;
+            } else if (deliveryType.includes('postomat')) {
                 deliveryTitle = SHIPPING_TITLES.POSTOMAT; 
-                
-                if (npWarehouse) {
-                    finalAddressLine = `Нова Пошта Поштомат №${npWarehouse}`; // Nova Poshta Postomat
-                    extendedFields = {
-                        "namespaces": {
-                            "_user_fields": {
-                                "nomer_viddilennya_poshtomatu_novoyi_poshti": npWarehouse // Nova Poshta branch/postamat number
-                            }
-                        }
-                    };
-                } else {
-                    finalAddressLine = "Нова Пошта Поштомат (номер не указан)"; // Nova Poshta (number not specified)
-                }
-            
-            } else { // Обробка "НП Відділення" та інших (BRANCH)
+                finalAddressLine = npWarehouse ? `Нова Пошта Поштомат №${npWarehouse}` : "Нова Пошта Поштомат";
+                if(npWarehouse) extendedFields = { "namespaces": { "_user_fields": { "nomer_viddilennya_poshtomatu_novoyi_poshti": npWarehouse } } };
+            } else {
                 deliveryTitle = SHIPPING_TITLES.BRANCH; 
-                
-                if (npWarehouse) {
-                    finalAddressLine = `Нова Пошта №${npWarehouse}`; // Nova Poshta Branch
-                    extendedFields = {
-                        "namespaces": {
-                            "_user_fields": {
-                                "nomer_viddilennya_poshtomatu_novoyi_poshti": npWarehouse // Nova Poshta branch/postamat number
-                            }
-                        }
-                    };
-                } else {
-                    finalAddressLine = "Нова Пошта (номер не указан)"; // Nova Poshta (number not specified)
-                }
+                finalAddressLine = npWarehouse ? `Нова Пошта №${npWarehouse}` : "Нова Пошта";
+                if(npWarehouse) extendedFields = { "namespaces": { "_user_fields": { "nomer_viddilennya_poshtomatu_novoyi_poshti": npWarehouse } } };
             }
 
-            const shippingAddress = {
-                country: "UA",
-                city: npCity || "City",
-                addressLine: finalAddressLine, 
-                postalCode: "00000"
-            };
+            const shippingAddress = { country: "UA", city: npCity || "City", addressLine: finalAddressLine, postalCode: "00000" };
 
             const wixOrderPayload = {
-                channelInfo: {
-                    type: "WEB",
-                    externalOrderId: murkitOrderId
-                },
+                channelInfo: { type: "WEB", externalOrderId: murkitOrderId },
                 status: "APPROVED",
                 lineItems: lineItems,
                 priceSummary: priceSummary,
                 billingInfo: {
                     address: shippingAddress, 
-                    contactDetails: {
-                        firstName: clientName.firstName,
-                        lastName: clientName.lastName,
-                        phone: clientPhone, // FIX: Use clientPhone
-                        email: email
-                    }
+                    contactDetails: { firstName: clientName.firstName, lastName: clientName.lastName, phone: clientPhone, email: email }
                 },
                 shippingInfo: {
                     title: deliveryTitle,
-                    logistics: {
-                        shippingDestination: {
-                            address: shippingAddress,
-                            contactDetails: {
-                                firstName: recipientName.firstName,
-                                lastName: recipientName.lastName,
-                                phone: recipientPhone // FIX: Use recipientPhone
-                            }
-                        }
-                    },
+                    logistics: { shippingDestination: { address: shippingAddress, contactDetails: { firstName: recipientName.firstName, lastName: recipientName.lastName, phone: recipientPhone } } },
                     cost: { price: { amount: "0.00", currency } }
                 },
                 buyerInfo: { email: email },
-                paymentStatus: "PAID", // FIX: Set paymentStatus to PAID unconditionally as requested
+                // !!! ЗМІНА: НЕ СТАВИМО "PAID" ТУТ. Залишаємо UNPAID.
+                // paymentStatus: "PAID", 
                 currency: currency,
                 weightUnit: "KG",
                 taxIncludedInPrices: false,
                 ...(Object.keys(extendedFields).length > 0 ? { extendedFields } : {})
             };
 
+            // 1. Створюємо замовлення (Воно буде UNPAID)
             const createdOrder = await createWixOrder(wixOrderPayload);
-            
-            // === EXPLICIT INVENTORY DEDUCTION ===
-            if (adjustments.length > 0) {
+            const newOrderId = createdOrder.order?.id;
+
+            // 2. ОДРАЗУ додаємо оплату (це створює Transaction ID)
+            if (newOrderId) {
                 try {
-                    await adjustInventory(adjustments);
-                } catch (adjErr) {
-                    console.error("Warning: Inventory adjustment failed, but order was created.", adjErr);
+                    await addExternalPayment(newOrderId, fmtPrice(murkitData.sum), currency);
+                } catch (payErr) {
+                    console.error(`Warning: Failed to add payment to order ${newOrderId}`, payErr);
                 }
             }
-
-            res.status(201).json({ 
-                "id": createdOrder.order?.id 
-            });
-
-        } catch (e) {
-            console.error('Murkit Webhook Error (Order Creation Final Catch):', e.message);
             
-            const status = e.status || 500;
-            
-            if (status === 409 && (e.code === 'ITEM_NOT_FOUND' || e.code === 'ITEM_NOT_AVAILABLE')) {
-                return res.status(409).json({
-                    message: e.message,
-                    code: e.code
-                });
+            if (adjustments.length > 0) {
+                try { await adjustInventory(adjustments); } catch (adjErr) { console.error("Warning: Inventory adjustment failed", adjErr); }
             }
 
-            res.status(status).json({ 
-                error: e.message 
-            });
+            res.status(201).json({ "id": newOrderId });
+
+        } catch (e) {
+            console.error('Murkit Webhook Error:', e.message);
+            const status = e.status || 500;
+            if (status === 409) return res.status(409).json({ message: e.message, code: e.code });
+            res.status(status).json({ error: e.message });
         }
     }
 
-    // 5. Handling unknown routes/methods
     return res.status(404).json({ message: 'Not Found' });
 }
