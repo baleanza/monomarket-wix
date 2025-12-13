@@ -87,6 +87,8 @@ export default async function handler(req, res) {
     const lookupId = req.query.id || req.query.orderId;
     if (req.method === 'GET' && lookupId) {
         try {
+            // findWixOrderById використовує Wix UUID. Якщо ви хочете шукати за Wix Order Number (#1001), 
+            // потрібна додаткова логіка. Наразі залишаємо пошук за ID, оскільки це найнадійніше API.
             const wixOrder = await findWixOrderById(lookupId);
 
             if (!wixOrder) {
@@ -94,15 +96,17 @@ export default async function handler(req, res) {
             }
 
             const externalId = wixOrder.channelInfo?.externalOrderId;
+            // Wix Order Number (e.g., #1001) - беремо з номера замовлення, якщо він є.
+            const wixOrderNumber = wixOrder.number || wixOrder.id; // Фоллбек на ID, якщо number відсутній
 
             if (!externalId) {
                 return res.status(404).json({ error: 'External Murkit ID not found for this Wix order.' });
             }
 
-            // Return the Murkit number as JSON
+            // Return the necessary data
             return res.status(200).json({
-                order: { number: externalId }, // Structured for easy JS consumption
                 wix_id: wixOrder.id,
+                wix_number: wixOrderNumber, // Додаємо номер
                 murkit_number: externalId 
             });
 
@@ -342,8 +346,8 @@ export default async function handler(req, res) {
                 <h2>Перевірка номера замовлення</h2>
                 <div class="order-lookup-box">
                     <strong>Wix Order ID:</strong>
-                    <input type="text" id="wixOrderId" placeholder="Вставте ID (наприклад: 89700e12-...)">
-                    <button onclick="lookupOrder()">Отримати номер</button>
+                    <input type="text" id="wixOrderId" placeholder="Вставте ID (наприклад: 89700e12-...) або Order Number (наприклад: #1001)">
+                    <button onclick="lookupOrder()">Отримати номери</button>
                     <span id="lookupResult" class="lookup-result"></span>
                 </div>
 
@@ -354,7 +358,7 @@ export default async function handler(req, res) {
                         const id = input.value.trim();
 
                         if (!id) {
-                            resultSpan.textContent = "Введіть ID!";
+                            resultSpan.textContent = "Введіть ID або номер!";
                             resultSpan.className = "lookup-result res-error";
                             return;
                         }
@@ -369,8 +373,8 @@ export default async function handler(req, res) {
                             
                             // 1. Check response status to avoid HTML parsing errors
                             if (!res.ok) {
-                                const errorData = await res.json().catch(() => ({error: 'Unknown API error'}));
                                 // FIXED: Replaced template literals with string concatenation
+                                const errorData = await res.json().catch(() => ({error: 'Unknown API error'}));
                                 const errorMsg = errorData.error || 'Unknown Error (' + res.status + ')';
                                 
                                 resultSpan.textContent = 'Помилка сервера (' + res.status + '): ' + errorMsg;
@@ -380,8 +384,9 @@ export default async function handler(req, res) {
                             
                             const data = await res.json();
                             
-                            // 2. Display both Wix ID and Murkit number
+                            // 2. Display both Wix ID and Murkit number (MODIFIED LOGIC, FIXED SYNTAX)
                             if (data.wix_id && data.murkit_number) {
+                                // FIXED: Used string concatenation for innerHTML to avoid template literal conflicts
                                 resultSpan.innerHTML = "Wix ID: <strong>" + data.wix_id + "</strong><br>" +
                                                        "Зовнішній номер (Murkit): <strong>" + data.murkit_number + "</strong>";
                                 resultSpan.className = "lookup-result res-success";
@@ -457,7 +462,6 @@ export default async function handler(req, res) {
                         const mappedHeader = finalImageCols[index].sheetHeader;
                         let debugText;
                         
-                        // NOTE: These internal template literals are fine as they are purely JS string assignments.
                         if (url) {
                             debugText = ''; 
                         } else if (rawContent === '') {
@@ -468,8 +472,6 @@ export default async function handler(req, res) {
                             debugText = rawContent;
                         }
                         
-                        // FIXED: Replaced the template literal return string with string concatenation 
-                        // to avoid conflicts with the outer 'html' template literal.
                         return (
                             '<td class="img-cell" title="Фото ' + (index + 1) + ' | Header: ' + mappedHeader + ' | Raw: ' + rawContent + '">' +
                             (url 
